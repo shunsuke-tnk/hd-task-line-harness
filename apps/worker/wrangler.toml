@@ -6,6 +6,9 @@ workers_dev = true
 # API_KEY is set via `wrangler secret put API_KEY`
 # Do NOT hardcode secrets here
 
+[vars]
+WORKER_URL = "https://your-worker.your-subdomain.workers.dev"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "line-crm"
