@@ -1,0 +1,33 @@
+{
+  "name": "@line-harness/mcp-server",
+  "version": "0.1.0",
+  "description": "MCP Server for LINE Harness — operate LINE official accounts from any AI tool",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "line-harness-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc && chmod 755 dist/index.js",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js"
+  },
+  "keywords": ["mcp", "line", "crm", "ai"],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@line-harness/sdk": "workspace:*",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^20.0.0"
+  }
+}
