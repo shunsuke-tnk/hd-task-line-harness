@@ -1,7 +1,7 @@
 {
   "name": "create-line-harness",
-  "version": "0.1.12",
-  "description": "Set up LINE Harness — AI-operated LINE CRM — with one command",
+  "version": "0.1.13",
+  "description": "Set up LINE Harness \u2014 AI-operated LINE CRM \u2014 with one command",
   "type": "module",
   "bin": {
     "create-line-harness": "./dist/index.js"

@@ -31,6 +31,7 @@ rsync -av --delete \
   --exclude='CLAUDE.md' \
   --exclude='.mcp.json' \
   --exclude='*.toml.bak' \
+  --exclude='promo' \
   "$PRIVATE_DIR/" "$OSS_DIR/"
 
 # Clean secrets
