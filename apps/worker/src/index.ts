@@ -45,6 +45,10 @@ import { autoReplies } from './routes/auto-replies.js';
 import { trafficPools } from './routes/traffic-pools.js';
 import { meetCallback } from './routes/meet-callback.js';
 import { messageTemplates } from './routes/message-templates.js';
+// HD TaskBot extension
+import { tasks } from './routes/tasks.js';
+import { staffMetrics } from './routes/staff-metrics.js';
+import { processTaskReminders } from './services/task-reminders.js';
 
 export type Env = {
   Bindings: {
@@ -116,6 +120,9 @@ app.route('/', trafficPools);
 app.route('/', accountSettings);
 app.route('/', meetCallback);
 app.route('/', messageTemplates);
+// HD TaskBot
+app.route('/', tasks);
+app.route('/', staffMetrics);
 
 // Self-hosted QR code proxy — prevents leaking ref tokens to third-party services
 app.get('/api/qr', async (c) => {
@@ -361,6 +368,8 @@ async function scheduled(
   jobs.push(processQueuedBroadcasts(env.DB, defaultLineClient, env.WORKER_URL));
   jobs.push(checkAccountHealth(env.DB));
   jobs.push(refreshLineAccessTokens(env.DB));
+  // HD TaskBot: 期日リマインド (5分毎) + 09:00/18:00 定刻リマインド
+  jobs.push(processTaskReminders(env.DB, defaultLineClient));
 
   await Promise.allSettled(jobs);
 

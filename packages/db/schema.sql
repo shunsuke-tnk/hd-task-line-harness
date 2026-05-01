@@ -621,3 +621,56 @@ CREATE TABLE IF NOT EXISTS pool_accounts (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(pool_id, line_account_id)
 );
+
+-- ============================================================================
+-- HD TaskBot extension (migration 029_tasks.sql)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS tasks (
+  id                    TEXT PRIMARY KEY,
+  display_id            TEXT NOT NULL,
+  title                 TEXT NOT NULL,
+  description           TEXT,
+  requester_friend_id   TEXT NOT NULL REFERENCES friends(id) ON DELETE RESTRICT,
+  assignee_friend_id    TEXT NOT NULL REFERENCES friends(id) ON DELETE RESTRICT,
+  due_at                TEXT NOT NULL,
+  status                TEXT NOT NULL DEFAULT 'pending'
+                          CHECK (status IN ('pending','in_progress','done','delayed','problem','cancelled')),
+  started_at            TEXT,
+  completed_at          TEXT,
+  postpone_count        INTEGER NOT NULL DEFAULT 0,
+  problem_count         INTEGER NOT NULL DEFAULT 0,
+  overdue_alerted       INTEGER NOT NULL DEFAULT 0,
+  line_account_id       TEXT REFERENCES line_accounts(id) ON DELETE SET NULL,
+  created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee_friend_id, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_requester      ON tasks(requester_friend_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_due            ON tasks(due_at, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_display_id     ON tasks(display_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_account        ON tasks(line_account_id);
+
+CREATE TABLE IF NOT EXISTS task_events (
+  id                    TEXT PRIMARY KEY,
+  task_id               TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  event_type            TEXT NOT NULL CHECK (event_type IN (
+                          'created','started','completed',
+                          'delay_reported','problem_reported','postponed','cancelled',
+                          'remind_pre','remind_today','overdue_alerted',
+                          'request_proposed','reopened'
+                        )),
+  actor_friend_id       TEXT REFERENCES friends(id) ON DELETE SET NULL,
+  payload               TEXT NOT NULL DEFAULT '{}',
+  created_at            TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_task_events_task   ON task_events(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_events_actor  ON task_events(actor_friend_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_events_type   ON task_events(event_type, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS staff_metrics (
+  friend_id             TEXT PRIMARY KEY REFERENCES friends(id) ON DELETE CASCADE,
+  no_report_count       INTEGER NOT NULL DEFAULT 0,
+  reported_on_time_count INTEGER NOT NULL DEFAULT 0,
+  delay_report_count    INTEGER NOT NULL DEFAULT 0,
+  updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+);

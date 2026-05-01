@@ -16,6 +16,7 @@ import {
 } from '@line-crm/db';
 import { fireEvent } from '../services/event-bus.js';
 import { buildMessage, expandVariables } from '../services/step-delivery.js';
+import { handleTaskPostback } from '../services/task-postback.js';
 import type { Env } from '../index.js';
 
 const webhook = new Hono<Env>();
@@ -66,7 +67,7 @@ webhook.post('/webhook', async (c) => {
   const processingPromise = (async () => {
     for (const event of body.events) {
       try {
-        await handleEvent(db, lineClient, event, channelAccessToken, matchedAccountId, c.env.WORKER_URL || new URL(c.req.url).origin);
+        await handleEvent(db, lineClient, event, channelAccessToken, matchedAccountId, c.env.WORKER_URL || new URL(c.req.url).origin, c.env.LIFF_URL || '');
       } catch (err) {
         console.error('Error handling webhook event:', err);
       }
@@ -85,6 +86,7 @@ async function handleEvent(
   lineAccessToken: string,
   lineAccountId: string | null = null,
   workerUrl?: string,
+  liffUrl: string = '',
 ): Promise<void> {
   if (event.type === 'follow') {
     const userId =
@@ -201,6 +203,22 @@ async function handleEvent(
     if (!friend) return;
 
     const postbackData = (event as unknown as { postback: { data: string } }).postback.data;
+
+    // HD TaskBot dispatch: action=task_* / metrics_show / request_or_propose_open など
+    // ハンドルできた場合は auto_replies へフォールスルーしない
+    try {
+      const handled = await handleTaskPostback({
+        db,
+        lineClient,
+        friend,
+        replyToken: event.replyToken,
+        postbackData,
+        liffUrl,
+      });
+      if (handled) return;
+    } catch (err) {
+      console.error('handleTaskPostback failed', err);
+    }
 
     // Match postback data against auto_replies (exact match on keyword)
     const autoReplyQuery = lineAccountId

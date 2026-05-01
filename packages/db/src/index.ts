@@ -25,6 +25,7 @@ export * from './staff';
 export * from './auto-replies';
 export * from './traffic-pools';
 export * from './message-templates';
+export * from './tasks'; // HD TaskBot extension (migration 029)
 
 /**
  * Thin wrapper around D1Database.

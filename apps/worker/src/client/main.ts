@@ -16,6 +16,7 @@
 
 import { initBooking } from './booking.js';
 import { initForm } from './form.js';
+import { dispatchTaskPage } from './task-form.js';
 
 declare const liff: {
   init(config: { liffId: string }): Promise<void>;
@@ -330,6 +331,10 @@ async function main() {
       const params = new URLSearchParams(window.location.search);
       const formId = params.get('id');
       await initForm(formId);
+    } else if (page && (page === 'task_request' || page === 'task_problem' || page === 'request_or_propose')) {
+      // HD TaskBot LIFF forms
+      const handled = await dispatchTaskPage(page);
+      if (!handled) await linkAndAddFlow();
     } else if (!page) {
       await linkAndAddFlow();
     } else {
