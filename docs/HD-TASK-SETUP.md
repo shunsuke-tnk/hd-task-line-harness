@@ -25,20 +25,33 @@
 
 ---
 
-## 1. LINE 公式アカウント (Messaging API + LINE Login)
+## 1. LINE 公式アカウント (Option B: 既存 Messaging API チャネル再利用 + 新規 LINE Login チャネル)
 
-[LINE Developers Console](https://developers.line.biz/console/) で **2 つのチャネル** を作成する。
+### 1-1. Messaging API チャネル — 既存「業務支援Botくん (TaskBot)」を再利用
 
-1. **Messaging API チャネル** — 「業務 TaskBot」など
-   - Webhook URL: `https://<your-worker>.workers.dev/webhook` (デプロイ後に登録)
-   - Webhook 利用: **オン**
-   - 応答メッセージ: **オフ** (Bot 側で完全制御するため)
-   - あいさつメッセージ: 任意 (推奨: 「友だち追加ありがとうございます。下のメニューから操作してください」)
-2. **LINE Login チャネル** — 「業務 TaskBot Login」など
-   - LIFF アプリを 1 つ作成 (Endpoint: `https://<your-worker>.workers.dev/`)
-   - Scope: `openid` `profile`
+[LINE Developers Console](https://developers.line.biz/console/) で既存 TaskBot チャネルを開く。
 
-> 上流ドキュメントどおり Login チャネルがないと UUID 取得ができないので必須。
+- 既存の **チャネルシークレット** / **チャネルアクセストークン** をそのまま使用
+- OpenClaw `~/.openclaw/.env` に `LINE_WORK_CHANNEL_SECRET` / `LINE_WORK_CHANNEL_ACCESS_TOKEN` として保存済 → これを取り出して LINE Harness 側に投入
+- **設定変更**:
+  - 応答メッセージ: **オフ** (LINE Harness が完全制御するため)
+  - Webhook 利用: **オン**
+  - Webhook URL は **ここではまだ書き換えない** (Phase 1 のデプロイ完了後に切替)
+
+### 1-2. LINE Login チャネル — 新規作成
+
+LIFF と UID 取得用に **新規** で 1 つ作成する。既存 Messaging API と同じ Provider 配下に作るのが推奨。
+
+- 名前: 「業務 TaskBot Login」など
+- Scope: `openid` `profile`
+- アプリタイプ: ウェブアプリ
+- LIFF アプリを 1 つ作成:
+  - Endpoint URL: `https://<your-worker>.workers.dev/` (デプロイ後)
+  - サイズ: Tall (推奨) / Compact のどちらでも可
+  - Scope: `profile` `openid`
+
+> 既存 TaskBot は LINE Login チャネルを持っていないため、これは新規作成必須。
+> Messaging API チャネルとは別物だが、同じ Provider 配下なら友だち情報は共通化される。
 
 ## 2. Cloudflare 環境
 
@@ -61,16 +74,28 @@ npx wrangler d1 execute line-crm --file=packages/db/migrations/029_tasks.sql
 
 ```bash
 cd apps/worker
-npx wrangler secret put LINE_CHANNEL_SECRET
-npx wrangler secret put LINE_CHANNEL_ACCESS_TOKEN
-npx wrangler secret put API_KEY                    # 管理者用 (oneshot)
-npx wrangler secret put LINE_LOGIN_CHANNEL_ID
-npx wrangler secret put LINE_LOGIN_CHANNEL_SECRET
-# 環境変数 (worker.workers.dev のドメインを後で書き換えても可)
+
+# Option B: 既存 OpenClaw .env から値を取得して投入
+source ~/.openclaw/.env
+
+# 既存 TaskBot のチャネルシークレット / アクセストークンを再利用
+echo "$LINE_WORK_CHANNEL_SECRET"        | npx wrangler secret put LINE_CHANNEL_SECRET
+echo "$LINE_WORK_CHANNEL_ACCESS_TOKEN"  | npx wrangler secret put LINE_CHANNEL_ACCESS_TOKEN
+
+# 新規発行する API キー (LINE Harness 管理画面/MCP からのアクセス用)
+echo "$(openssl rand -hex 32)"          | npx wrangler secret put API_KEY
+
+# 新規 LINE Login チャネルの値 (Phase 1-2 で LINE Console から取得)
+echo "<login_channel_id>"               | npx wrangler secret put LINE_LOGIN_CHANNEL_ID
+echo "<login_channel_secret>"           | npx wrangler secret put LINE_LOGIN_CHANNEL_SECRET
+
+# 環境変数 (デプロイ後に書き換えてもOK)
 echo 'WORKER_URL = "https://<your-worker>.workers.dev"' >> wrangler.toml
 echo 'LIFF_URL   = "https://liff.line.me/<LIFF_ID>"' >> wrangler.toml
 echo 'LINE_CHANNEL_ID = "<messaging_api_channel_id>"' >> wrangler.toml
 ```
+
+> 投入した API キーは安全な場所 (1Password 等) に控えておく。LINE Harness 管理画面のログインや MCP server 経由の API 呼び出しに使用。
 
 ## 3. デプロイ
 
@@ -81,9 +106,38 @@ pnpm --filter worker build
 pnpm --filter worker deploy                 # === wrangler deploy
 ```
 
-LINE Console に Webhook URL を設定:
-- `https://<your-worker>.workers.dev/webhook`
-- 「検証」ボタンで 200 OK を確認
+### 3-1. Webhook URL を切替 (Option B のクリティカル工程)
+
+LINE Console → 既存 TaskBot Messaging API チャネル → Messaging API → Webhook URL:
+
+| | 値 |
+|---|---|
+| 旧 (OpenClaw 経由) | `https://tanakashunsukenomac-mini.tailcabd4c.ts.net:8443/line/webhook` |
+| **新 (LINE Harness)** | `https://<your-worker>.workers.dev/webhook` |
+
+「検証」ボタンで 200 OK を確認 → 保存。
+
+**この瞬間から OpenClaw の work agent は LINE 受信を停止します。LINE Harness が引き取ります。**
+
+> ロールバックが必要になった場合は LINE Console で旧 URL に戻すだけで OpenClaw 側に戻せる (OpenClaw 側を `enabled:false` にしていない限り)。Phase 7 で OpenClaw 側を停止するのは、LINE Harness が安定稼働してから。
+
+### 3-2. 既存 friends を LINE Harness D1 に取り込む (任意)
+
+既存 TaskBot で田中さん・光さんが友だちになっているが、LINE Harness の `friends` テーブルにはまだ無い。
+ユーザーが LINE 公式に何かメッセージを送る or LIFF を開いた瞬間に webhook で自動 upsert されるが、待たずに事前投入したい場合は以下。
+
+```bash
+# OpenClaw side で friend list 取得
+cat ~/.openclaw/workspace-work/TEAM.md | grep "userId"
+
+# Friend ごとに LINE Harness D1 に直接 INSERT
+npx wrangler d1 execute line-crm --remote --command "
+INSERT INTO friends (id, line_user_id, display_name, is_following, line_account_id, metadata, created_at, updated_at)
+VALUES
+  ('<uuid>', 'U5d7ee1da8ebca511705659f416252e52', '光さん', 1, NULL, '{}', datetime('now'), datetime('now')),
+  ('<uuid>', 'Ue7226d70034d350eba884a2b442da0cf', '田中俊輔', 1, NULL, '{}', datetime('now'), datetime('now'))
+"
+```
 
 ## 4. ロールタグの作成
 
@@ -228,18 +282,79 @@ curl -X POST https://<your-worker>.workers.dev/api/friends/<friend_id>/tags \
 - **LINE 無料プラン**: 200 通/月。リマインド頻度を超える場合は Light プラン (5000通/月) へ
 - **マルチアカウント設定時**: タスクに `line_account_id` を記録するが、現状はリマインド push に default account の LineClient を使う (個別 access_token 解決は将来対応)
 
-## 10. ロールバック手順
+## 10. OpenClaw 側カットオーバー (Option B Phase 7)
+
+LINE Harness が安定稼働 (動作確認チェックリスト全項目クリア) してから実施。
+OpenClaw work agent を **削除せず**、LINE webhook 受信だけ止める。
+
+### 10-1. OpenClaw の LINE channel を停止
+
+```bash
+# 1. 設定ファイルバックアップ
+cp ~/.openclaw/openclaw.json ~/.openclaw/openclaw.json.bak-before-line-harness-cutover-$(date +%Y%m%d-%H%M%S)
+
+# 2. channels.line.enabled を false に
+openclaw config set channels.line.enabled false
+
+# 3. gateway 再起動
+openclaw gateway restart
+```
+
+### 10-2. Tailscale Funnel 8443 を停止
+
+```bash
+# LINE webhook 公開を閉じる (セキュリティ向上)
+tailscale funnel --https=8443 off
+
+# port 443 (tailnet-only dashboard) は維持
+tailscale serve status
+```
+
+### 10-3. system crontab の notion-sync を停止
+
+```bash
+crontab -e
+# `*/5 * * * * /Users/.../notion-sync-runner.sh` の行を削除
+```
+
+### 10-4. workspace-work を git commit (削除はしない)
+
+```bash
+cd ~/.openclaw/workspace-work
+git add -A && git commit -m "freeze: pre-LINE-Harness-cutover snapshot"
+git push
+```
+
+> **重要**: `~/.openclaw/agents/work/` と `~/.openclaw/workspace-work/` は **保持する**。
+> LINE Harness が将来「AI 文面生成 (週次サマリー / ねぎらい文 / 壁打ち応答)」を OpenClaw 経由で行う際、
+> SOUL.md / IDENTITY.md / CONVERSATION-STYLE-WORK.md を参照元として使用するため。
+
+## 11. ロールバック手順
 
 万一の障害時は:
 
+### 11-1. 軽度: LINE Harness 側のみ停止
 ```bash
 # Cron triggers を停止
 npx wrangler triggers update --crons ""
+```
 
-# Webhook URL を空に → LINE 側で受信停止
-# LINE Developers Console → Webhook URL を空欄保存
+### 11-2. 中度: OpenClaw に戻す (LINE webhook 復旧)
+```bash
+# OpenClaw 側を再有効化
+openclaw config set channels.line.enabled true
+openclaw gateway restart
 
-# DB スキーマのロールバック (タスクのみ削除)
+# Tailscale Funnel 復旧
+tailscale funnel --https=8443 --bg /line/webhook=http://127.0.0.1:18789
+
+# LINE Console で Webhook URL を旧 Tailscale URL に戻す
+```
+これで OpenClaw work agent が LINE 受信を再開する (active.json と SOUL.md は保持しているのでチャット型運用に即時復帰可能)。
+
+### 11-3. 重度: DB 拡張をロールバック
+```bash
+# タスク関連テーブルのみ削除 (LINE Harness 標準テーブルは残す)
 echo "DROP TABLE IF EXISTS task_events; DROP TABLE IF EXISTS tasks; DROP TABLE IF EXISTS staff_metrics;" | \
   npx wrangler d1 execute line-crm --command -
 ```
