@@ -99,8 +99,8 @@ export function buildTaskCard(opts: TaskCardOpts): unknown {
           layout: 'baseline',
           spacing: 'sm',
           contents: [
-            { type: 'text', text: '担当', size: 'xs', color: '#888', flex: 1 },
-            { type: 'text', text: assigneeName || '—', size: 'sm', color: '#333', flex: 4, wrap: true },
+            { type: 'text', text: '担当', size: 'xs', color: '#888888', flex: 1 },
+            { type: 'text', text: assigneeName || '—', size: 'sm', color: '#333333', flex: 4, wrap: true },
           ],
         },
         {
@@ -108,8 +108,8 @@ export function buildTaskCard(opts: TaskCardOpts): unknown {
           layout: 'baseline',
           spacing: 'sm',
           contents: [
-            { type: 'text', text: '期日', size: 'xs', color: '#888', flex: 1 },
-            { type: 'text', text: due, size: 'sm', color: '#333', flex: 2 },
+            { type: 'text', text: '期日', size: 'xs', color: '#888888', flex: 1 },
+            { type: 'text', text: due, size: 'sm', color: '#333333', flex: 2 },
             { type: 'text', text: remaining.label, size: 'sm', color: remaining.color, flex: 2, align: 'end' },
           ],
         },
@@ -120,7 +120,7 @@ export function buildTaskCard(opts: TaskCardOpts): unknown {
                 layout: 'baseline',
                 spacing: 'sm',
                 contents: [
-                  { type: 'text', text: '延期', size: 'xs', color: '#888', flex: 1 },
+                  { type: 'text', text: '延期', size: 'xs', color: '#888888', flex: 1 },
                   { type: 'text', text: `${task.postpone_count}回`, size: 'sm', color: '#F4511E', flex: 4 },
                 ],
               },
@@ -237,7 +237,7 @@ export function buildEmptyTaskBubble(): unknown {
       type: 'box',
       layout: 'vertical',
       contents: [
-        { type: 'text', text: '対象のタスクはありません', size: 'sm', color: '#888', align: 'center' },
+        { type: 'text', text: '対象のタスクはありません', size: 'sm', color: '#888888', align: 'center' },
       ],
     },
   };
@@ -254,7 +254,7 @@ export function buildDelayMenuCard(task: Task, assigneeName: string | null): unk
       layout: 'horizontal',
       contents: [
         { type: 'text', text: '⏰ 遅延報告', weight: 'bold', size: 'sm', color: '#F4511E' },
-        { type: 'text', text: task.display_id, size: 'xs', color: '#888', align: 'end' },
+        { type: 'text', text: task.display_id, size: 'xs', color: '#888888', align: 'end' },
       ],
     },
     body: {
@@ -268,8 +268,8 @@ export function buildDelayMenuCard(task: Task, assigneeName: string | null): unk
           layout: 'baseline',
           spacing: 'sm',
           contents: [
-            { type: 'text', text: '担当', size: 'xs', color: '#888', flex: 1 },
-            { type: 'text', text: assigneeName || '—', size: 'sm', color: '#333', flex: 4 },
+            { type: 'text', text: '担当', size: 'xs', color: '#888888', flex: 1 },
+            { type: 'text', text: assigneeName || '—', size: 'sm', color: '#333333', flex: 4 },
           ],
         },
         {
@@ -277,12 +277,12 @@ export function buildDelayMenuCard(task: Task, assigneeName: string | null): unk
           layout: 'baseline',
           spacing: 'sm',
           contents: [
-            { type: 'text', text: '現期日', size: 'xs', color: '#888', flex: 1 },
-            { type: 'text', text: formatDate(task.due_at), size: 'sm', color: '#333', flex: 4 },
+            { type: 'text', text: '現期日', size: 'xs', color: '#888888', flex: 1 },
+            { type: 'text', text: formatDate(task.due_at), size: 'sm', color: '#333333', flex: 4 },
           ],
         },
         { type: 'separator', margin: 'md' },
-        { type: 'text', text: '何日延期しますか?', size: 'sm', color: '#555', margin: 'md' },
+        { type: 'text', text: '何日延期しますか?', size: 'sm', color: '#555555', margin: 'md' },
       ],
     },
     footer: {
@@ -326,7 +326,7 @@ export function buildConfirmComplete(task: Task): unknown {
       spacing: 'sm',
       contents: [
         { type: 'text', text: '完了として記録しますか?', weight: 'bold', size: 'md', wrap: true },
-        { type: 'text', text: `${task.display_id} ${task.title}`, size: 'sm', color: '#555', wrap: true },
+        { type: 'text', text: `${task.display_id} ${task.title}`, size: 'sm', color: '#555555', wrap: true },
       ],
     },
     footer: {
@@ -371,8 +371,8 @@ export function buildConfirmCancel(task: Task): unknown {
       spacing: 'sm',
       contents: [
         { type: 'text', text: 'タスクを取り消しますか?', weight: 'bold', size: 'md', wrap: true },
-        { type: 'text', text: `${task.display_id} ${task.title}`, size: 'sm', color: '#555', wrap: true },
-        { type: 'text', text: '取り消した番号は再利用されません。', size: 'xs', color: '#888' },
+        { type: 'text', text: `${task.display_id} ${task.title}`, size: 'sm', color: '#555555', wrap: true },
+        { type: 'text', text: '取り消した番号は再利用されません。', size: 'xs', color: '#888888' },
       ],
     },
     footer: {
@@ -421,7 +421,7 @@ export function buildReminderCard(task: Task, assigneeName: string | null, kind:
       layout: 'horizontal',
       contents: [
         { type: 'text', text: titlePrefix, weight: 'bold', size: 'sm', color: headerColor },
-        { type: 'text', text: task.display_id, size: 'xs', color: '#888', align: 'end' },
+        { type: 'text', text: task.display_id, size: 'xs', color: '#888888', align: 'end' },
       ],
     },
     body: {
@@ -435,8 +435,8 @@ export function buildReminderCard(task: Task, assigneeName: string | null, kind:
           layout: 'baseline',
           spacing: 'sm',
           contents: [
-            { type: 'text', text: '担当', size: 'xs', color: '#888', flex: 1 },
-            { type: 'text', text: assigneeName || '—', size: 'sm', color: '#333', flex: 4 },
+            { type: 'text', text: '担当', size: 'xs', color: '#888888', flex: 1 },
+            { type: 'text', text: assigneeName || '—', size: 'sm', color: '#333333', flex: 4 },
           ],
         },
         {
@@ -444,8 +444,8 @@ export function buildReminderCard(task: Task, assigneeName: string | null, kind:
           layout: 'baseline',
           spacing: 'sm',
           contents: [
-            { type: 'text', text: '期日', size: 'xs', color: '#888', flex: 1 },
-            { type: 'text', text: due, size: 'sm', color: '#333', flex: 2 },
+            { type: 'text', text: '期日', size: 'xs', color: '#888888', flex: 1 },
+            { type: 'text', text: due, size: 'sm', color: '#333333', flex: 2 },
             { type: 'text', text: remaining.label, size: 'sm', color: remaining.color, flex: 2, align: 'end' },
           ],
         },
@@ -475,7 +475,7 @@ export function buildCompletionNoticeCard(task: Task, assigneeName: string | nul
       layout: 'horizontal',
       contents: [
         { type: 'text', text: '🎉 完了の報告', weight: 'bold', size: 'sm', color: '#43A047' },
-        { type: 'text', text: task.display_id, size: 'xs', color: '#888', align: 'end' },
+        { type: 'text', text: task.display_id, size: 'xs', color: '#888888', align: 'end' },
       ],
     },
     body: {
@@ -484,7 +484,7 @@ export function buildCompletionNoticeCard(task: Task, assigneeName: string | nul
       spacing: 'sm',
       contents: [
         { type: 'text', text: task.title, weight: 'bold', size: 'md', wrap: true },
-        { type: 'text', text: `${assigneeName || '担当者'}が${durationDays}日で対応してくださいました`, size: 'sm', color: '#555', wrap: true },
+        { type: 'text', text: `${assigneeName || '担当者'}が${durationDays}日で対応してくださいました`, size: 'sm', color: '#555555', wrap: true },
       ],
     },
   };
@@ -505,7 +505,7 @@ export function buildMetricsBubble(rows: MetricsBubbleRow[], title = '📊 タ�
     layout: 'horizontal',
     spacing: 'xs',
     contents: [
-      { type: 'text', text: '名前', size: 'xs', color: '#888', flex: 4, weight: 'bold' },
+      { type: 'text', text: '名前', size: 'xs', color: '#888888', flex: 4, weight: 'bold' },
       { type: 'text', text: '健全', size: 'xs', color: '#43A047', flex: 2, align: 'end', weight: 'bold' },
       { type: 'text', text: '遅延', size: 'xs', color: '#F4511E', flex: 2, align: 'end', weight: 'bold' },
       { type: 'text', text: '漏れ', size: 'xs', color: '#D32F2F', flex: 2, align: 'end', weight: 'bold' },
@@ -516,13 +516,13 @@ export function buildMetricsBubble(rows: MetricsBubbleRow[], title = '📊 タ�
     return b.reportedOnTimeCount - a.reportedOnTimeCount;
   });
   const dataRows = sorted.length === 0
-    ? [{ type: 'text' as const, text: 'まだ集計データがありません', size: 'sm' as const, color: '#888', align: 'center' as const }]
+    ? [{ type: 'text' as const, text: 'まだ集計データがありません', size: 'sm' as const, color: '#888888', align: 'center' as const }]
     : sorted.map((r) => ({
         type: 'box',
         layout: 'horizontal',
         spacing: 'xs',
         contents: [
-          { type: 'text', text: r.displayName || '—', size: 'sm', color: '#333', flex: 4, wrap: true },
+          { type: 'text', text: r.displayName || '—', size: 'sm', color: '#333333', flex: 4, wrap: true },
           { type: 'text', text: String(r.reportedOnTimeCount), size: 'sm', color: '#43A047', flex: 2, align: 'end' },
           { type: 'text', text: String(r.delayReportCount), size: 'sm', color: '#F4511E', flex: 2, align: 'end' },
           { type: 'text', text: String(r.noReportCount), size: 'sm', color: '#D32F2F', flex: 2, align: 'end' },
@@ -550,7 +550,7 @@ export function buildMetricsBubble(rows: MetricsBubbleRow[], title = '📊 タ�
           type: 'text',
           text: '遅延があっても申告できていれば健全です。',
           size: 'xxs',
-          color: '#888',
+          color: '#888888',
           wrap: true,
           margin: 'sm',
         },

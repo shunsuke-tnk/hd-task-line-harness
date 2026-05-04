@@ -1,13 +1,13 @@
-name = "line-harness"
+name = "hd-task-bot"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 workers_dev = true
 
 # ═══════════════════════════════════════════════════════════════
-# デフォルト = テスト環境 (noda@)
+# HD TaskBot — sunsky.nue26@gmail.com
 # 使い方: npx wrangler deploy
 # ═══════════════════════════════════════════════════════════════
-account_id = "YOUR_DEV_ACCOUNT_ID"
+account_id = "f19cff873d6125770c0095287dc5e7ab"
 
 [assets]
 directory = "dist/client"
@@ -15,8 +15,8 @@ binding = "ASSETS"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "line-harness"
-database_id = "YOUR_DEV_D1_DATABASE_ID"
+database_name = "hd-task-bot"
+database_id = "4e63beb0-ab4d-4557-b6c4-483d1d2a53e3"
 
 [[r2_buckets]]
 binding = "IMAGES"
@@ -25,26 +25,8 @@ bucket_name = "line-harness-images"
 [triggers]
 crons = ["*/5 * * * *"]
 
-# ═══════════════════════════════════════════════════════════════
-# 本番環境 (aiagent.mini@)
-# 使い方: npx wrangler deploy --env production --name your-worker-name
-# D1:     npx wrangler d1 execute line-crm --env production --remote --file ...
-# ═══════════════════════════════════════════════════════════════
-[env.production]
-account_id = "YOUR_ACCOUNT_ID"
-
-[env.production.assets]
-directory = "dist/client"
-binding = "ASSETS"
-
-[[env.production.d1_databases]]
-binding = "DB"
-database_name = "line-crm"
-database_id = "YOUR_D1_DATABASE_ID"
-
-[[env.production.r2_buckets]]
-binding = "IMAGES"
-bucket_name = "line-harness-images"
-
-[env.production.triggers]
-crons = ["*/5 * * * *"]
+# 環境変数 (公開可。秘密値は wrangler secret put で投入済)
+[vars]
+WORKER_URL = "https://hd-task-bot.sunsky-nue26.workers.dev"
+LIFF_URL = "https://liff.line.me/2009971783-Szm9bLIC"
+LINE_CHANNEL_ID = ""
