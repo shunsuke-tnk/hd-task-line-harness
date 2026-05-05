@@ -16,8 +16,11 @@ import {
   isTimeBefore,
   jstNow,
   type Task,
+  type Friend,
   type TaskStatus,
 } from '@line-crm/db';
+import { LineClient } from '@line-crm/line-sdk';
+import { buildTaskCard } from '../services/task-flex.js';
 import type { Env } from '../index.js';
 
 // =============================================================================
@@ -63,6 +66,34 @@ async function friendHasAdminRole(db: D1Database, friendId: string): Promise<boo
     .bind(friendId, ADMIN_TAG_NAME)
     .first();
   return Boolean(row);
+}
+
+/**
+ * タスク作成時に担当者へカード通知を push する。
+ * 担当者 == 依頼者 でも送る (LIFF送信完了の確認になる)。
+ * push 失敗はログのみで握り潰し、API レスポンスは成功扱い。
+ */
+async function pushTaskAssignedNotice(
+  env: Env['Bindings'],
+  task: Task,
+  assignee: Friend,
+): Promise<void> {
+  if (!assignee.line_user_id) return;
+  try {
+    const client = new LineClient(env.LINE_CHANNEL_ACCESS_TOKEN);
+    const card = buildTaskCard({
+      task,
+      assigneeName: assignee.display_name ?? null,
+      actions: ['start', 'complete', 'delay_menu', 'problem'],
+    });
+    await client.pushFlexMessage(
+      assignee.line_user_id,
+      `📌 新しいタスク依頼: ${task.title}`,
+      card as never,
+    );
+  } catch (err) {
+    console.error('pushTaskAssignedNotice failed', { taskId: task.id, err });
+  }
 }
 
 /**
@@ -113,6 +144,8 @@ tasks.post('/api/tasks', async (c) => {
       due_at: body.dueAt,
       line_account_id: body.lineAccountId ?? null,
     });
+
+    await pushTaskAssignedNotice(c.env, task, assignee);
 
     return c.json({ success: true, data: serializeTask(task) });
   } catch (err) {
@@ -280,6 +313,8 @@ tasks.post('/api/liff/tasks', async (c) => {
       due_at: body.dueAt,
       line_account_id: requester.line_account_id ?? assignee.line_account_id ?? null,
     });
+
+    await pushTaskAssignedNotice(c.env, task, assignee);
 
     return c.json({ success: true, data: serializeTask(task) });
   } catch (err) {
