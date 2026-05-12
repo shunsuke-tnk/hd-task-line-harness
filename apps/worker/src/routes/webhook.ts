@@ -17,6 +17,7 @@ import {
 import { fireEvent } from '../services/event-bus.js';
 import { buildMessage, expandVariables } from '../services/step-delivery.js';
 import { handleTaskPostback } from '../services/task-postback.js';
+import { buildWelcomeApplyCard } from '../services/task-flex.js';
 import type { Env } from '../index.js';
 
 const webhook = new Hono<Env>();
@@ -181,6 +182,30 @@ async function handleEvent(
 
     // イベントバス発火: friend_add（replyToken は Step 0 で使用済みの可能性あり）
     await fireEvent(db, 'friend_add', { friendId: friend.id, eventData: { displayName: friend.display_name } }, lineAccessToken, lineAccountId);
+
+    // HD TaskBot: 既に admin/staff として登録されていなければ Welcome Apply Card を push 配信。
+    // (再フォロー / 復帰時に push が走らないよう、ロール持ち friend には送らない)
+    try {
+      const tagRow = await db
+        .prepare(
+          `SELECT t.name FROM friend_tags ft
+           INNER JOIN tags t ON t.id = ft.tag_id
+           WHERE ft.friend_id = ? AND t.name IN ('role:admin','role:staff')
+           LIMIT 1`,
+        )
+        .bind(friend.id)
+        .first<{ name: string }>();
+      if (!tagRow) {
+        const welcomeCard = buildWelcomeApplyCard({ displayName: friend.display_name ?? null });
+        await lineClient.pushFlexMessage(
+          userId,
+          'HD TaskBot へようこそ',
+          welcomeCard as never,
+        );
+      }
+    } catch (err) {
+      console.error('Welcome apply card push failed', err);
+    }
     return;
   }
 

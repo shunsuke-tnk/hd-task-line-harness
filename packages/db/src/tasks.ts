@@ -27,7 +27,14 @@ export type TaskEventType =
   | 'remind_today'
   | 'overdue_alerted'
   | 'request_proposed'
-  | 'reopened';
+  | 'reopened'
+  // 2段階承認 (migration 030):
+  | 'completion_proposed_by_assignee'
+  | 'completion_proposed_by_requester'
+  | 'completion_finalized'
+  | 'problem_resolved_by_assignee'
+  | 'problem_resolved_by_requester'
+  | 'problem_finalized';
 
 export interface Task {
   id: string;
@@ -46,6 +53,11 @@ export interface Task {
   line_account_id: string | null;
   created_at: string;
   updated_at: string;
+  // 2段階承認用 (migration 030)。NULL = まだ押されていない。
+  completion_assignee_marked_at: string | null;
+  completion_requester_marked_at: string | null;
+  problem_resolved_assignee_at: string | null;
+  problem_resolved_requester_at: string | null;
 }
 
 export interface TaskEvent {
@@ -315,6 +327,235 @@ export async function markTaskCompleted(
   return getTaskById(db, id);
 }
 
+// ── 2段階承認: 完了 (migration 030) ──────────────────────────────────────────
+//
+// 担当者・依頼者の双方が「完了」を押下した時点で初めて status='done' に確定。
+// 片側のみ押下した状態は status='in_progress' のまま、
+// completion_assignee_marked_at / completion_requester_marked_at に時刻を記録。
+//
+// 設計メモ:
+//   * 既に status='done' のタスクへの再呼び出しは no-op
+//   * 既に同側がマーク済みなら時刻更新せずに finalize 判定だけ行う
+//   * 双方マーク済みになったら status='done' + completed_at = max(両者) に確定し
+//     completion_finalized イベントを 1 回だけ追記
+// ----------------------------------------------------------------------------
+
+export interface CompletionMarkResult {
+  task: Task | null;
+  finalized: boolean;
+  alreadyMarked: boolean;
+}
+
+async function markCompletionSide(
+  db: D1Database,
+  id: string,
+  actor: string,
+  side: 'assignee' | 'requester',
+): Promise<CompletionMarkResult> {
+  const cur = await getTaskById(db, id);
+  if (!cur) return { task: null, finalized: false, alreadyMarked: false };
+  if (cur.status === 'done' || cur.status === 'cancelled') {
+    return { task: cur, finalized: false, alreadyMarked: true };
+  }
+  const colMarked =
+    side === 'assignee' ? 'completion_assignee_marked_at' : 'completion_requester_marked_at';
+  const wasMarked =
+    side === 'assignee'
+      ? cur.completion_assignee_marked_at !== null
+      : cur.completion_requester_marked_at !== null;
+  const now = jstNow();
+  if (!wasMarked) {
+    await db
+      .prepare(`UPDATE tasks SET ${colMarked} = ?, updated_at = ? WHERE id = ?`)
+      .bind(now, now, id)
+      .run();
+    await appendTaskEvent(db, {
+      task_id: id,
+      event_type:
+        side === 'assignee'
+          ? 'completion_proposed_by_assignee'
+          : 'completion_proposed_by_requester',
+      actor_friend_id: actor,
+      payload: {},
+    });
+  }
+  // 再取得して finalize 判定
+  const after = await getTaskById(db, id);
+  if (!after) return { task: null, finalized: false, alreadyMarked: wasMarked };
+  if (
+    after.completion_assignee_marked_at !== null &&
+    after.completion_requester_marked_at !== null &&
+    after.status !== 'done'
+  ) {
+    const finalizedAt = jstNow();
+    await db
+      .prepare(
+        `UPDATE tasks
+         SET status = 'done', completed_at = ?, updated_at = ?, overdue_alerted = 0
+         WHERE id = ?`,
+      )
+      .bind(finalizedAt, finalizedAt, id)
+      .run();
+    await appendTaskEvent(db, {
+      task_id: id,
+      event_type: 'completion_finalized',
+      actor_friend_id: actor,
+      payload: {},
+    });
+    // 互換性のため completed イベントも追記 (旧集計を壊さない)
+    await appendTaskEvent(db, {
+      task_id: id,
+      event_type: 'completed',
+      actor_friend_id: actor,
+      payload: { via: 'two_phase' },
+    });
+    return { task: await getTaskById(db, id), finalized: true, alreadyMarked: wasMarked };
+  }
+  return { task: after, finalized: false, alreadyMarked: wasMarked };
+}
+
+/** 担当者が「完了報告」を押下。 */
+export async function markCompletionByAssignee(
+  db: D1Database,
+  id: string,
+  actor: string,
+): Promise<CompletionMarkResult> {
+  return markCompletionSide(db, id, actor, 'assignee');
+}
+
+/** 依頼者が「完了承認」を押下。 */
+export async function markCompletionByRequester(
+  db: D1Database,
+  id: string,
+  actor: string,
+): Promise<CompletionMarkResult> {
+  return markCompletionSide(db, id, actor, 'requester');
+}
+
+// ── 2段階承認: 問題解決 (migration 030) ──────────────────────────────────────
+
+export interface ProblemResolveResult {
+  task: Task | null;
+  finalized: boolean;
+  alreadyMarked: boolean;
+}
+
+async function markProblemResolvedSide(
+  db: D1Database,
+  id: string,
+  actor: string,
+  side: 'assignee' | 'requester',
+): Promise<ProblemResolveResult> {
+  const cur = await getTaskById(db, id);
+  if (!cur) return { task: null, finalized: false, alreadyMarked: false };
+  // 既に status が problem 以外 (cancelled/done) ならスキップ
+  if (cur.status !== 'problem') {
+    return { task: cur, finalized: false, alreadyMarked: true };
+  }
+  const colResolved =
+    side === 'assignee' ? 'problem_resolved_assignee_at' : 'problem_resolved_requester_at';
+  const wasMarked =
+    side === 'assignee'
+      ? cur.problem_resolved_assignee_at !== null
+      : cur.problem_resolved_requester_at !== null;
+  const now = jstNow();
+  if (!wasMarked) {
+    await db
+      .prepare(`UPDATE tasks SET ${colResolved} = ?, updated_at = ? WHERE id = ?`)
+      .bind(now, now, id)
+      .run();
+    await appendTaskEvent(db, {
+      task_id: id,
+      event_type:
+        side === 'assignee'
+          ? 'problem_resolved_by_assignee'
+          : 'problem_resolved_by_requester',
+      actor_friend_id: actor,
+      payload: {},
+    });
+  }
+  const after = await getTaskById(db, id);
+  if (!after) return { task: null, finalized: false, alreadyMarked: wasMarked };
+  if (
+    after.problem_resolved_assignee_at !== null &&
+    after.problem_resolved_requester_at !== null
+  ) {
+    // 双方解決マーク → 問題終了。status は in_progress に戻し、完了の継続処理に乗せる
+    const finalizedAt = jstNow();
+    await db
+      .prepare(
+        `UPDATE tasks
+         SET status = CASE WHEN started_at IS NULL THEN 'pending' ELSE 'in_progress' END,
+             updated_at = ?
+         WHERE id = ?`,
+      )
+      .bind(finalizedAt, id)
+      .run();
+    await appendTaskEvent(db, {
+      task_id: id,
+      event_type: 'problem_finalized',
+      actor_friend_id: actor,
+      payload: {},
+    });
+    return { task: await getTaskById(db, id), finalized: true, alreadyMarked: wasMarked };
+  }
+  return { task: after, finalized: false, alreadyMarked: wasMarked };
+}
+
+/** 担当者が「問題解決済み」をマーク。 */
+export async function markProblemResolvedByAssignee(
+  db: D1Database,
+  id: string,
+  actor: string,
+): Promise<ProblemResolveResult> {
+  return markProblemResolvedSide(db, id, actor, 'assignee');
+}
+
+/** 依頼者が「問題解決済み」をマーク。 */
+export async function markProblemResolvedByRequester(
+  db: D1Database,
+  id: string,
+  actor: string,
+): Promise<ProblemResolveResult> {
+  return markProblemResolvedSide(db, id, actor, 'requester');
+}
+
+/** 現在 status='problem' のタスク (両側 or 片側 解決待ち含む) を全件返す。 */
+export async function listOpenProblems(db: D1Database): Promise<Task[]> {
+  const result = await db
+    .prepare(`SELECT * FROM tasks WHERE status = 'problem' ORDER BY due_at ASC, created_at ASC LIMIT 200`)
+    .all<Task>();
+  return result.results;
+}
+
+/** 直近の problem_reported event を返す (一覧表示で text/severity を取り出すため)。 */
+export async function getLatestProblemReport(
+  db: D1Database,
+  taskId: string,
+): Promise<{ text: string; severity: 'low' | 'medium' | 'high'; reporterFriendId: string | null; createdAt: string } | null> {
+  const row = await db
+    .prepare(
+      `SELECT actor_friend_id, payload, created_at FROM task_events
+       WHERE task_id = ? AND event_type = 'problem_reported'
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .bind(taskId)
+    .first<{ actor_friend_id: string | null; payload: string; created_at: string }>();
+  if (!row) return null;
+  let parsed: { text?: string; severity?: 'low' | 'medium' | 'high' } = {};
+  try {
+    parsed = JSON.parse(row.payload || '{}');
+  } catch {
+    /* ignore */
+  }
+  return {
+    text: parsed.text ?? '',
+    severity: parsed.severity ?? 'medium',
+    reporterFriendId: row.actor_friend_id,
+    createdAt: row.created_at,
+  };
+}
+
 export async function markTaskCancelled(
   db: D1Database,
   id: string,
@@ -389,10 +630,13 @@ export async function reportTaskProblem(
   problem: { text: string; severity?: 'low' | 'medium' | 'high' },
 ): Promise<Task | null> {
   const now = jstNow();
+  // 新たな問題が発生した時点で、過去の解決マーク (両側) はリセット
   await db
     .prepare(
       `UPDATE tasks
-       SET status = 'problem', problem_count = problem_count + 1, updated_at = ?
+       SET status = 'problem', problem_count = problem_count + 1, updated_at = ?,
+           problem_resolved_assignee_at = NULL,
+           problem_resolved_requester_at = NULL
        WHERE id = ?`,
     )
     .bind(now, id)

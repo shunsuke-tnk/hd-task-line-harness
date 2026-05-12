@@ -20,7 +20,7 @@ import {
   type TaskStatus,
 } from '@line-crm/db';
 import { LineClient } from '@line-crm/line-sdk';
-import { buildTaskCard } from '../services/task-flex.js';
+import { buildTaskCard, buildProblemReportCard } from '../services/task-flex.js';
 import type { Env } from '../index.js';
 
 // =============================================================================
@@ -52,6 +52,11 @@ function serializeTask(t: Task) {
     lineAccountId: t.line_account_id,
     createdAt: t.created_at,
     updatedAt: t.updated_at,
+    // 2段階承認 (migration 030)
+    completionAssigneeMarkedAt: t.completion_assignee_marked_at,
+    completionRequesterMarkedAt: t.completion_requester_marked_at,
+    problemResolvedAssigneeAt: t.problem_resolved_assignee_at,
+    problemResolvedRequesterAt: t.problem_resolved_requester_at,
   };
 }
 
@@ -84,7 +89,8 @@ async function pushTaskAssignedNotice(
     const card = buildTaskCard({
       task,
       assigneeName: assignee.display_name ?? null,
-      actions: ['start', 'complete', 'delay_menu', 'problem'],
+      actions: ['start', 'complete_assignee', 'delay_menu', 'problem'],
+      showDescription: true,
     });
     await client.pushFlexMessage(
       assignee.line_user_id,
@@ -93,6 +99,70 @@ async function pushTaskAssignedNotice(
     );
   } catch (err) {
     console.error('pushTaskAssignedNotice failed', { taskId: task.id, err });
+  }
+}
+
+/**
+ * 問題報告時に push 通知を送る。
+ * 通知先: 報告者本人を除く {担当者, 依頼者, role:admin タグ持ちの全員}
+ *   - 重複 friend_id を排除
+ *   - line_user_id が無い friend はスキップ
+ *   - push 失敗はログのみで握り潰し (報告自体は成功扱い)
+ */
+async function pushTaskProblemNotice(
+  env: Env['Bindings'],
+  task: Task,
+  problem: { text: string; severity: 'low' | 'medium' | 'high' },
+  reporterFriendId: string,
+): Promise<void> {
+  try {
+    const client = new LineClient(env.LINE_CHANNEL_ACCESS_TOKEN);
+    const [assignee, requester, reporter, admins] = await Promise.all([
+      getFriendById(env.DB, task.assignee_friend_id),
+      getFriendById(env.DB, task.requester_friend_id),
+      getFriendById(env.DB, reporterFriendId),
+      env.DB
+        .prepare(
+          `SELECT f.* FROM friends f
+           INNER JOIN friend_tags ft ON ft.friend_id = f.id
+           INNER JOIN tags t ON t.id = ft.tag_id
+           WHERE t.name = ?`,
+        )
+        .bind(ADMIN_TAG_NAME)
+        .all<Friend>(),
+    ]);
+    const seen = new Set<string>([reporterFriendId]);
+    const targets: Friend[] = [];
+    const tryAdd = (f: Friend | null | undefined) => {
+      if (!f) return;
+      if (seen.has(f.id)) return;
+      if (!f.line_user_id) return;
+      seen.add(f.id);
+      targets.push(f);
+    };
+    tryAdd(assignee);
+    tryAdd(requester);
+    for (const a of admins.results) tryAdd(a);
+
+    if (targets.length === 0) return;
+
+    const card = buildProblemReportCard({
+      task,
+      assigneeName: assignee?.display_name ?? null,
+      reporterName: reporter?.display_name ?? null,
+      text: problem.text,
+      severity: problem.severity,
+    });
+    const altText = `⚠️ 問題報告: ${task.title}`;
+    await Promise.all(
+      targets.map((f) =>
+        client
+          .pushFlexMessage(f.line_user_id!, altText, card as never)
+          .catch((err) => console.error('pushTaskProblemNotice item failed', { taskId: task.id, friendId: f.id, err })),
+      ),
+    );
+  } catch (err) {
+    console.error('pushTaskProblemNotice failed', { taskId: task.id, err });
   }
 }
 
@@ -345,6 +415,12 @@ tasks.post('/api/liff/tasks/:id/problem', async (c) => {
       text: body.text.trim(),
       severity: body.severity,
     });
+    if (updated) {
+      await pushTaskProblemNotice(c.env, updated, {
+        text: body.text.trim(),
+        severity: body.severity ?? 'medium',
+      }, actor.id);
+    }
     return c.json({ success: true, data: updated ? serializeTask(updated) : null });
   } catch (err) {
     console.error('POST /api/liff/tasks/:id/problem error:', err);

@@ -206,7 +206,7 @@ export async function initTaskRequestPage(lineUserId: string) {
       <div class="form-title">📝 タスク依頼</div>
       <form id="task-request-form">
         <div class="form-row">
-          <label class="form-label" for="title">タスク内容 (誰に何をお願いするか)</label>
+          <label class="form-label" for="title">タスク内容(どんな結果を依頼するか)</label>
           <input class="form-input" id="title" name="title" type="text" maxlength="200" required placeholder="例: 広告バナー一次案を作成" />
         </div>
         <div class="form-row">
@@ -302,7 +302,7 @@ export async function initTaskProblemPage(lineUserId: string, taskIdHint: string
           </select>
         </div>
         <div class="form-row">
-          <label class="form-label">緊急度</label>
+          <label class="form-label">問題の緊急度</label>
           <div class="form-radio-row">
             <label><input type="radio" name="severity" value="low" /> 低</label>
             <label><input type="radio" name="severity" value="medium" checked /> 中</label>
@@ -423,6 +423,15 @@ export async function initRequestOrProposePage(lineUserId: string) {
 
 // ── ルーター ──────────────────────────────────────────────────────────────
 
+function readParam(name: string): string | null {
+  // hash フラグメント (#k=v&k2=v2) を優先、なければ search query を読む
+  if (window.location.hash) {
+    const hp = new URLSearchParams(window.location.hash.replace(/^#/, '')).get(name);
+    if (hp) return hp;
+  }
+  return new URLSearchParams(window.location.search).get(name);
+}
+
 export async function dispatchTaskPage(page: string): Promise<boolean> {
   const profile = await resolveProfile();
   if (!profile) {
@@ -431,13 +440,12 @@ export async function dispatchTaskPage(page: string): Promise<boolean> {
     root.innerHTML = `<div class="form-card"><div class="form-title">アクセスエラー</div><p>友だち追加が完了していません。一度公式LINEを友だち追加してから再度お試しください。</p></div>`;
     return true;
   }
-  const params = new URLSearchParams(window.location.search);
   if (page === 'task_request') {
     await initTaskRequestPage(profile.lineUserId);
     return true;
   }
   if (page === 'task_problem') {
-    await initTaskProblemPage(profile.lineUserId, params.get('taskId'));
+    await initTaskProblemPage(profile.lineUserId, readParam('taskId'));
     return true;
   }
   if (page === 'request_or_propose') {

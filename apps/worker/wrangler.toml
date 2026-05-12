@@ -12,6 +12,7 @@ account_id = "f19cff873d6125770c0095287dc5e7ab"
 [assets]
 directory = "dist/client"
 binding = "ASSETS"
+not_found_handling = "single-page-application"
 
 [[d1_databases]]
 binding = "DB"

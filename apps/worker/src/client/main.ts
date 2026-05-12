@@ -55,10 +55,27 @@ function apiCall(path: string, options?: RequestInit): Promise<Response> {
 }
 
 function getPage(): string | null {
-  const path = window.location.pathname.replace(/^\/+/, '');
-  if (path === 'book') return 'book';
+  // 1) hash フラグメント (#page=task_request) — 推奨形式
+  if (window.location.hash) {
+    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const hp = hashParams.get('page');
+    if (hp) return hp;
+  }
+  // 2) path 形式 (https://liff.line.me/<LIFF_ID>/task_request)
+  const path = window.location.pathname.replace(/^\/+/, '').replace(/\/+$/, '');
+  const knownPages = new Set(['book', 'task_request', 'task_problem', 'request_or_propose']);
+  if (knownPages.has(path)) return path;
+  // 3) クエリ形式 (?page=task_request) — 後方互換
   const params = new URLSearchParams(window.location.search);
   return params.get('page');
+}
+
+function getHashOrQueryParam(name: string): string | null {
+  if (window.location.hash) {
+    const hp = new URLSearchParams(window.location.hash.replace(/^#/, '')).get(name);
+    if (hp) return hp;
+  }
+  return new URLSearchParams(window.location.search).get(name);
 }
 
 function getRedirectUrl(): string | null {
