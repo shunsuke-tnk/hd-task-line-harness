@@ -72,11 +72,15 @@ import {
 } from './task-flex.js';
 
 // Rich Menu / Tag IDs (本番運用値、変更時は両方とも更新)
-const RICH_MENU_ADMIN_ID = 'richmenu-e7f2c603210c83fb9f8ec966dd9cd39e';
-const RICH_MENU_STAFF_ID = 'richmenu-0f1b3643e66e983ff5ba7e2d6d1d9de8';
+// v6/v5 (2026-05-12): 全員共通 6 ボタンレイアウト (タスク依頼/完了報告/遅延報告/問題報告/プロジェクト一覧/依頼・提案)
+const RICH_MENU_ADMIN_ID = 'richmenu-145160d79b870d2c4088bd9b93f7d1bb';
+const RICH_MENU_STAFF_ID = 'richmenu-a3c2e164e3f527d9dcfbb3bff985c437';
 const TAG_ROLE_ADMIN_ID = 'a98b0ac0-41ee-4dee-bf6f-fb58432ea1fa';
 const TAG_ROLE_STAFF_ID = '632eb650-f67f-4591-b7bc-66e079ac6d33';
 const TAG_PENDING_STAFF_ID = '80392547-9c98-47fb-929c-dd07a7412594';
+// migration 031 で seed する社員/委託 区分タグ
+const TAG_TYPE_EMPLOYEE_ID = 'c6f3a6e0-30b1-4f3e-8a9a-9d52d7c4f001';
+const TAG_TYPE_CONTRACTOR_ID = 'c6f3a6e0-30b1-4f3e-8a9a-9d52d7c4f002';
 
 const ADMIN_TAG_NAME = 'role:admin';
 
@@ -618,7 +622,9 @@ export async function handleTaskPostback(ctx: PostbackContext): Promise<boolean>
       return true;
     }
 
-    case 'staff_approve':
+    case 'staff_approve': // legacy: staff role のみ、type は付けない (broadcast/lazy で本人が選ぶ)
+    case 'staff_approve_staff_employee':
+    case 'staff_approve_staff_contractor':
     case 'staff_approve_admin': {
       // admin のみ実行可
       const isAdmin = await friendHasAdminRole(ctx.db, ctx.friend.id);
@@ -637,11 +643,33 @@ export async function handleTaskPostback(ctx: PostbackContext): Promise<boolean>
         return true;
       }
       const targetRole: 'staff' | 'admin' = action === 'staff_approve_admin' ? 'admin' : 'staff';
+      const targetType: 'employee' | 'contractor' | null =
+        action === 'staff_approve_admin'
+          ? 'employee' // admin は社員扱い固定
+          : action === 'staff_approve_staff_employee'
+            ? 'employee'
+            : action === 'staff_approve_staff_contractor'
+              ? 'contractor'
+              : null; // legacy `staff_approve` — type 未付与
       const roleTagId = targetRole === 'admin' ? TAG_ROLE_ADMIN_ID : TAG_ROLE_STAFF_ID;
+      const typeTagId =
+        targetType === 'employee'
+          ? TAG_TYPE_EMPLOYEE_ID
+          : targetType === 'contractor'
+            ? TAG_TYPE_CONTRACTOR_ID
+            : null;
       const richMenuId = targetRole === 'admin' ? RICH_MENU_ADMIN_ID : RICH_MENU_STAFF_ID;
+
       // pending:staff を外して、role タグを付与
       await removeFriendTag(ctx.db, applicantId, TAG_PENDING_STAFF_ID).catch(() => {});
       await addFriendTag(ctx.db, applicantId, roleTagId);
+      // 区分 (type) タグ: 排他で付与 (反対側があれば外す)
+      if (typeTagId) {
+        const otherTypeId =
+          typeTagId === TAG_TYPE_EMPLOYEE_ID ? TAG_TYPE_CONTRACTOR_ID : TAG_TYPE_EMPLOYEE_ID;
+        await removeFriendTag(ctx.db, applicantId, otherTypeId).catch(() => {});
+        await addFriendTag(ctx.db, applicantId, typeTagId);
+      }
       // Rich Menu リンク
       if (applicant.line_user_id) {
         try {
@@ -650,9 +678,11 @@ export async function handleTaskPostback(ctx: PostbackContext): Promise<boolean>
           console.error('linkRichMenuToUser failed', { applicantId, err });
         }
       }
+      const typeLabel =
+        targetType === 'employee' ? '社員' : targetType === 'contractor' ? '委託' : '区分未設定';
       await replyText(
         ctx,
-        `✅ ${applicant.display_name ?? '申請者'} さんを ${targetRole} として承認しました`,
+        `✅ ${applicant.display_name ?? '申請者'} さんを ${targetRole}・${typeLabel} として承認しました`,
       );
       // 申請者に通知
       if (applicant.line_user_id) {
@@ -698,6 +728,90 @@ export async function handleTaskPostback(ctx: PostbackContext): Promise<boolean>
           console.error('rejection notice push failed', { applicantId, err });
         }
       }
+      return true;
+    }
+
+    // リッチメニュー「プロジェクト一覧」: LIFF projects ページを開く Flex を返信
+    case 'projects_open':
+      await replyFlex(
+        ctx,
+        'プロジェクト一覧',
+        buildLiffOpenBubble({
+          title: '📋 プロジェクト一覧',
+          description: 'タスクの俯瞰・完了一覧・進行中などをタブ切替で確認できます',
+          liffUrl: liffWith(ctx.liffUrl, 'projects'),
+          buttonLabel: 'プロジェクト一覧を開く',
+        }),
+      );
+      return true;
+
+    // 社員/委託 区分 選択カードの「社員 / 委託 として登録」ボタン
+    case 'set_member_type': {
+      const value = params.get('value');
+      if (value !== 'employee' && value !== 'contractor') {
+        await replyText(ctx, '区分の値が不正です。');
+        return true;
+      }
+      const typeTagId = value === 'employee' ? TAG_TYPE_EMPLOYEE_ID : TAG_TYPE_CONTRACTOR_ID;
+      const otherId = value === 'employee' ? TAG_TYPE_CONTRACTOR_ID : TAG_TYPE_EMPLOYEE_ID;
+      await removeFriendTag(ctx.db, ctx.friend.id, otherId).catch(() => {});
+      await addFriendTag(ctx.db, ctx.friend.id, typeTagId);
+      await replyText(
+        ctx,
+        value === 'employee'
+          ? '✅ 社員 として登録しました。毎朝 9:30 に進捗報告のリマインドが届きます🙏'
+          : '✅ 委託 として登録しました。タスク期日に応じた進捗報告のみお願いします🙏',
+      );
+      return true;
+    }
+
+    // admin リッチメニュー「再登録カードを全員に送る」: broadcast endpoint をサーバ内で叩く
+    case 'request_member_type_resend_all': {
+      const isAdmin = await friendHasAdminRole(ctx.db, ctx.friend.id);
+      if (!isAdmin) {
+        await replyText(ctx, 'この操作は管理者のみ可能です。');
+        return true;
+      }
+      // broadcast 対象を直接 SELECT して push (route の処理を内製化、HTTP 経由を避ける)
+      const targets = await ctx.db
+        .prepare(
+          `SELECT f.* FROM friends f
+           WHERE f.is_following = 1
+             AND EXISTS (
+               SELECT 1 FROM friend_tags ft
+               INNER JOIN tags t ON t.id = ft.tag_id
+               WHERE ft.friend_id = f.id AND t.name IN ('role:admin','role:staff')
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM friend_tags ft
+               INNER JOIN tags t ON t.id = ft.tag_id
+               WHERE ft.friend_id = f.id AND t.name IN ('type:employee','type:contractor')
+             )`,
+        )
+        .all<Friend>();
+      let sent = 0;
+      const { buildMemberTypeChoiceCard } = await import('./task-flex.js');
+      for (const f of targets.results) {
+        if (!f.line_user_id) continue;
+        try {
+          const card = buildMemberTypeChoiceCard({
+            friendDisplayName: f.display_name ?? null,
+            reason: 'broadcast',
+          });
+          await ctx.lineClient.pushFlexMessage(
+            f.line_user_id,
+            '👋 社員 / 委託 区分の登録',
+            card as never,
+          );
+          sent++;
+        } catch (err) {
+          console.error('member_type broadcast push failed', { friendId: f.id, err });
+        }
+      }
+      await replyText(
+        ctx,
+        `📨 区分未登録 ${targets.results.length} 名にカードを送信 (成功 ${sent} 件)`,
+      );
       return true;
     }
   }

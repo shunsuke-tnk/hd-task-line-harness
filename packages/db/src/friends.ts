@@ -197,3 +197,35 @@ export async function getFriendCount(db: D1Database): Promise<number> {
     .first<{ count: number }>();
   return row?.count ?? 0;
 }
+
+/** Parse friend.metadata JSON. Returns {} if invalid. */
+export function parseFriendMetadata(friend: Friend | { metadata: string }): Record<string, unknown> {
+  try {
+    const v = JSON.parse(friend.metadata || '{}');
+    return v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Merge-patch the friend's metadata JSON column.
+ * Read-modify-write (D1 has no JSON path update). Safe under low contention.
+ */
+export async function updateFriendMetadata(
+  db: D1Database,
+  friendId: string,
+  patch: Record<string, unknown>,
+): Promise<void> {
+  const cur = await db
+    .prepare(`SELECT metadata FROM friends WHERE id = ?`)
+    .bind(friendId)
+    .first<{ metadata: string }>();
+  let base: Record<string, unknown> = {};
+  if (cur) base = parseFriendMetadata(cur);
+  const merged = { ...base, ...patch };
+  await db
+    .prepare(`UPDATE friends SET metadata = ?, updated_at = ? WHERE id = ?`)
+    .bind(JSON.stringify(merged), jstNow(), friendId)
+    .run();
+}

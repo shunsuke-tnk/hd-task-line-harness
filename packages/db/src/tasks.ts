@@ -34,7 +34,16 @@ export type TaskEventType =
   | 'completion_finalized'
   | 'problem_resolved_by_assignee'
   | 'problem_resolved_by_requester'
-  | 'problem_finalized';
+  | 'problem_finalized'
+  // 段階リマインド + 社員日報 (migration 032):
+  | 'progress_reminder_first'
+  | 'progress_reminder_second'
+  | 'progress_reported'
+  | 'daily_report_requested'
+  | 'daily_report_submitted'
+  | 'member_type_changed';
+
+export type TaskPriority = 'high' | 'medium' | 'low';
 
 export interface Task {
   id: string;
@@ -58,6 +67,8 @@ export interface Task {
   completion_requester_marked_at: string | null;
   problem_resolved_assignee_at: string | null;
   problem_resolved_requester_at: string | null;
+  // 優先度 (migration 031): デフォルト 'medium'
+  priority: TaskPriority;
 }
 
 export interface TaskEvent {
@@ -130,6 +141,7 @@ export interface CreateTaskInput {
   assignee_friend_id: string;
   due_at: string; // ISO 8601 +09:00
   line_account_id?: string | null;
+  priority?: TaskPriority; // default 'medium'
 }
 
 export interface CreateTaskResult {
@@ -146,11 +158,12 @@ export async function createTask(
   const display_id = await nextDisplayId(db, now);
   const ts = toJstString(now);
 
+  const priority: TaskPriority = input.priority ?? 'medium';
   await db
     .prepare(
       `INSERT INTO tasks (id, display_id, title, description, requester_friend_id, assignee_friend_id,
-        due_at, status, postpone_count, problem_count, overdue_alerted, line_account_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, 0, 0, ?, ?, ?)`,
+        due_at, status, postpone_count, problem_count, overdue_alerted, line_account_id, priority, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, 0, 0, ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -161,6 +174,7 @@ export async function createTask(
       input.assignee_friend_id,
       input.due_at,
       input.line_account_id ?? null,
+      priority,
       ts,
       ts,
     )
@@ -170,7 +184,7 @@ export async function createTask(
     task_id: id,
     event_type: 'created',
     actor_friend_id: input.requester_friend_id,
-    payload: { display_id, title: input.title, due_at: input.due_at },
+    payload: { display_id, title: input.title, due_at: input.due_at, priority },
   });
 
   const task = (await getTaskById(db, id)) as Task;
@@ -198,6 +212,7 @@ export interface ListTasksFilter {
   due_before?: string;
   due_after?: string;
   line_account_id?: string;
+  priorities?: TaskPriority[];
   limit?: number;
   offset?: number;
 }
@@ -230,6 +245,11 @@ export async function listTasks(db: D1Database, filter: ListTasksFilter = {}): P
   if (filter.line_account_id) {
     where.push('line_account_id = ?');
     binds.push(filter.line_account_id);
+  }
+  if (filter.priorities && filter.priorities.length > 0) {
+    const placeholders = filter.priorities.map(() => '?').join(',');
+    where.push(`priority IN (${placeholders})`);
+    binds.push(...filter.priorities);
   }
 
   const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
@@ -556,6 +576,72 @@ export async function getLatestProblemReport(
   };
 }
 
+// ── 編集 (title / description / due_at / priority の部分更新) ─────────────────
+//
+// プロジェクト一覧 LIFF から呼ばれる。完了済 / 取消済タスクは編集不可。
+// 呼出側で権限チェック (admin or requester) を行う想定。
+
+export interface UpdateTaskFieldsInput {
+  title?: string;
+  description?: string | null;
+  due_at?: string;
+  priority?: TaskPriority;
+}
+
+export async function updateTaskFields(
+  db: D1Database,
+  id: string,
+  actor: string | null,
+  input: UpdateTaskFieldsInput,
+): Promise<Task | null> {
+  const cur = await getTaskById(db, id);
+  if (!cur) return null;
+  if (cur.status === 'done' || cur.status === 'cancelled') return cur;
+
+  const sets: string[] = [];
+  const binds: unknown[] = [];
+  if (input.title !== undefined) {
+    const v = input.title.trim().slice(0, 200);
+    if (v && v !== cur.title) {
+      sets.push('title = ?');
+      binds.push(v);
+    }
+  }
+  if (input.description !== undefined) {
+    const v = input.description === null ? null : input.description.trim().slice(0, 2000);
+    if (v !== cur.description) {
+      sets.push('description = ?');
+      binds.push(v);
+    }
+  }
+  if (input.due_at !== undefined && input.due_at && input.due_at !== cur.due_at) {
+    sets.push('due_at = ?');
+    binds.push(input.due_at);
+    // due_at を未来に動かしたら overdue フラグもクリア (再アラート対象に戻す)
+    sets.push('overdue_alerted = 0');
+  }
+  if (input.priority !== undefined && input.priority !== cur.priority) {
+    sets.push('priority = ?');
+    binds.push(input.priority);
+  }
+  if (sets.length === 0) return cur; // no-op
+
+  sets.push('updated_at = ?');
+  binds.push(jstNow());
+  binds.push(id);
+
+  await db
+    .prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?`)
+    .bind(...binds)
+    .run();
+
+  // 編集の event_type は migration 未追加なので task_events には記録しない。
+  // tasks.updated_at と field 自体の値で十分。`actor` は API 側で監査ログとして console.log されるだけ。
+  void actor;
+
+  return getTaskById(db, id);
+}
+
 export async function markTaskCancelled(
   db: D1Database,
   id: string,
@@ -708,6 +794,24 @@ export async function listTaskEvents(
     .bind(taskId, limit)
     .all<TaskEvent>();
   return result.results;
+}
+
+/**
+ * 指定 (task_id, event_type) の event が 1 件でもあれば true。
+ * cron リマインドの冪等性チェック (二重送信防止) に使う。
+ */
+export async function hasTaskEventOfType(
+  db: D1Database,
+  taskId: string,
+  eventType: TaskEventType,
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 FROM task_events WHERE task_id = ? AND event_type = ? LIMIT 1`,
+    )
+    .bind(taskId, eventType)
+    .first();
+  return Boolean(row);
 }
 
 // ── staff_metrics ───────────────────────────────────────────────────────────

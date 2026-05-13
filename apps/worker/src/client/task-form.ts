@@ -218,6 +218,14 @@ export async function initTaskRequestPage(lineUserId: string) {
           <div class="form-help">担当者は1名のみ選んでください</div>
         </div>
         <div class="form-row">
+          <label class="form-label">優先度</label>
+          <div class="form-radio-row">
+            <label><input type="radio" name="priority" value="high" /> 🔴 高</label>
+            <label><input type="radio" name="priority" value="medium" checked /> 🟡 中</label>
+            <label><input type="radio" name="priority" value="low" /> ⚪ 低</label>
+          </div>
+        </div>
+        <div class="form-row">
           <label class="form-label" for="dueAt">期日</label>
           <input class="form-input" id="dueAt" name="dueAt" type="date" required value="${todayPlus(2)}" min="${todayPlus(0)}" />
           <div class="form-quick-row">
@@ -258,6 +266,7 @@ export async function initTaskRequestPage(lineUserId: string) {
         title: String(fd.get('title') || ''),
         dueAt: dateToIsoJst(String(fd.get('dueAt') || '')),
         description: String(fd.get('description') || ''),
+        priority: String(fd.get('priority') || 'medium'),
       };
       const res = await fetch('/api/liff/tasks', {
         method: 'POST',
@@ -421,6 +430,77 @@ export async function initRequestOrProposePage(lineUserId: string) {
   });
 }
 
+// ── 進捗報告フォーム (中間 / 1-3 / 2-3 / 日報からの遷移) ─────────────────────
+
+export async function initProgressReportPage(lineUserId: string, taskIdHint: string | null) {
+  injectCSS();
+  const root = getRoot();
+  const tasks = await fetchMyTasks(lineUserId);
+  // 担当者として進捗を出せるのは「自分が assignee」のタスクのみ
+  const assignedTasks = tasks.filter((t) => t.isAssignee);
+  const options = assignedTasks
+    .map((t) => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.displayId)} ${escapeHtml(t.title)}</option>`)
+    .join('');
+
+  root.innerHTML = `
+    <div class="form-card">
+      <div class="form-title">📝 進捗報告</div>
+      <form id="progress-form">
+        <div class="form-row">
+          <label class="form-label" for="taskId">対象タスク</label>
+          <select class="form-select" id="taskId" name="taskId" required>
+            <option value="">選択してください</option>
+            ${options}
+          </select>
+          ${assignedTasks.length === 0 ? '<div class="form-help">担当タスクがありません</div>' : ''}
+        </div>
+        <div class="form-row">
+          <label class="form-label" for="text">進捗 (1〜2行で OK)</label>
+          <textarea class="form-textarea" id="text" name="text" maxlength="1000" required placeholder="例: バナー1次案完成、デザインレビュー依頼中"></textarea>
+        </div>
+        <button type="submit" class="form-submit" id="submit-btn">送信</button>
+      </form>
+    </div>
+  `;
+
+  const form = document.getElementById('progress-form') as HTMLFormElement;
+  if (taskIdHint) {
+    const sel = document.getElementById('taskId') as HTMLSelectElement;
+    if (Array.from(sel.options).some((o) => o.value === taskIdHint)) sel.value = taskIdHint;
+  }
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const submitBtn = document.getElementById('submit-btn') as HTMLButtonElement;
+    submitBtn.disabled = true;
+    submitBtn.textContent = '送信中…';
+    try {
+      const fd = new FormData(form);
+      const taskId = String(fd.get('taskId') || '');
+      const body = {
+        lineUserId,
+        text: String(fd.get('text') || ''),
+      };
+      const res = await fetch(`/api/liff/tasks/${encodeURIComponent(taskId)}/progress`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = (await res.json()) as { success: boolean; error?: string };
+      if (!json.success) {
+        showError(form, json.error || '送信に失敗しました');
+        submitBtn.disabled = false;
+        submitBtn.textContent = '送信';
+        return;
+      }
+      showSuccess('進捗を依頼者・管理者に共有しました');
+    } catch (err) {
+      showError(form, (err as Error).message);
+      submitBtn.disabled = false;
+      submitBtn.textContent = '送信';
+    }
+  });
+}
+
 // ── ルーター ──────────────────────────────────────────────────────────────
 
 function readParam(name: string): string | null {
@@ -450,6 +530,10 @@ export async function dispatchTaskPage(page: string): Promise<boolean> {
   }
   if (page === 'request_or_propose') {
     await initRequestOrProposePage(profile.lineUserId);
+    return true;
+  }
+  if (page === 'progress_report') {
+    await initProgressReportPage(profile.lineUserId, readParam('taskId'));
     return true;
   }
   return false;

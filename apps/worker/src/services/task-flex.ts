@@ -52,6 +52,19 @@ function statusBadge(status: string): { label: string; color: string } {
   }
 }
 
+/** 優先度バッジ (タスクカードのタイトル行に表示)。 */
+function priorityBadge(priority: string | undefined | null): { label: string; color: string } {
+  switch (priority) {
+    case 'high':
+      return { label: '🔴 高', color: '#E53935' };
+    case 'low':
+      return { label: '⚪ 低', color: '#9E9E9E' };
+    case 'medium':
+    default:
+      return { label: '🟡 中', color: '#FBC02D' };
+  }
+}
+
 // ── 1. タスクカード (1件) ────────────────────────────────────────────────────
 
 export interface TaskCardOpts {
@@ -99,7 +112,15 @@ export function buildTaskCard(opts: TaskCardOpts): unknown {
       layout: 'vertical',
       spacing: 'sm',
       contents: [
-        { type: 'text', text: task.title, weight: 'bold', size: 'md', wrap: true },
+        {
+          type: 'box',
+          layout: 'baseline',
+          spacing: 'sm',
+          contents: [
+            { type: 'text', text: priorityBadge(task.priority).label, size: 'sm', color: priorityBadge(task.priority).color, flex: 0 },
+            { type: 'text', text: task.title, weight: 'bold', size: 'md', wrap: true, flex: 5 },
+          ],
+        },
         {
           type: 'box',
           layout: 'baseline',
@@ -1200,13 +1221,25 @@ export function buildStaffApplicationNoticeCard(opts: {
         {
           type: 'button',
           style: 'primary',
-          color: '#06C755',
+          color: '#10B981',
           height: 'sm',
           action: {
             type: 'postback',
-            label: '✅ staff として承認',
-            data: `action=staff_approve&id=${opts.applicantFriendId}`,
-            displayText: `${opts.applicantDisplayName ?? '申請者'} を staff 承認`,
+            label: '✅ 社員 (staff) で承認',
+            data: `action=staff_approve_staff_employee&id=${opts.applicantFriendId}`,
+            displayText: `${opts.applicantDisplayName ?? '申請者'} を 社員 staff で承認`,
+          },
+        },
+        {
+          type: 'button',
+          style: 'primary',
+          color: '#F59E0B',
+          height: 'sm',
+          action: {
+            type: 'postback',
+            label: '🤝 委託 (staff) で承認',
+            data: `action=staff_approve_staff_contractor&id=${opts.applicantFriendId}`,
+            displayText: `${opts.applicantDisplayName ?? '申請者'} を 委託 staff で承認`,
           },
         },
         {
@@ -1297,6 +1330,319 @@ export function textMessage(text: string): { type: 'text'; text: string } {
 // ── 10. LIFF 起動用ボタン bubble ────────────────────────────────────────────
 // テキストメッセージ内の URL タップが LINE クライアントによっては機能しない
 // ケースがあるため、確実に tappable な uri action button で LIFF を開かせる。
+// ── 11. 進捗報告要求カード (中間 / 1/3 / 2/3 リマインドの本文) ──────────────────
+//
+// 期日まで日数のあるタスクに対して 「進捗を書いてください」 と促す。
+// LIFF `#page=progress_report&taskId=<id>` を hash 形式で開く button を持つ。
+
+export function buildProgressReminderCard(opts: {
+  task: Task;
+  assigneeName: string | null;
+  liffUrl: string;
+  kind: 'mid' | 'first' | 'second';
+}): unknown {
+  const { task, assigneeName, liffUrl, kind } = opts;
+  const due = formatDate(task.due_at);
+  const remaining = daysRemainingLabel(task.due_at);
+  const priority = priorityBadge(task.priority);
+  const heading =
+    kind === 'mid'
+      ? '🟡 中間チェック — 進捗を共有してください'
+      : kind === 'first'
+        ? '📍 1/3 経過 — 進捗を共有してください'
+        : '📍 2/3 経過 — 進捗を共有してください';
+  return {
+    type: 'bubble',
+    size: 'kilo',
+    header: {
+      type: 'box',
+      layout: 'horizontal',
+      contents: [
+        { type: 'text', text: task.display_id, weight: 'bold', size: 'sm', color: '#06C755', flex: 0 },
+        { type: 'text', text: heading, size: 'xs', color: '#FB8C00', align: 'end', wrap: true, flex: 4 },
+      ],
+    },
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'sm',
+      contents: [
+        {
+          type: 'box',
+          layout: 'baseline',
+          spacing: 'sm',
+          contents: [
+            { type: 'text', text: priority.label, size: 'sm', color: priority.color, flex: 0 },
+            { type: 'text', text: task.title, weight: 'bold', size: 'md', wrap: true, flex: 5 },
+          ],
+        },
+        {
+          type: 'box',
+          layout: 'baseline',
+          spacing: 'sm',
+          contents: [
+            { type: 'text', text: '担当', size: 'xs', color: '#888888', flex: 1 },
+            { type: 'text', text: assigneeName || '—', size: 'sm', color: '#333333', flex: 4, wrap: true },
+          ],
+        },
+        {
+          type: 'box',
+          layout: 'baseline',
+          spacing: 'sm',
+          contents: [
+            { type: 'text', text: '期日', size: 'xs', color: '#888888', flex: 1 },
+            { type: 'text', text: due, size: 'sm', color: '#333333', flex: 2 },
+            { type: 'text', text: remaining.label, size: 'sm', color: remaining.color, flex: 2, align: 'end' },
+          ],
+        },
+        {
+          type: 'text',
+          text: '進捗を 1-2 行で OK 🙏 ボタンから書いてください',
+          size: 'xs',
+          color: '#666666',
+          margin: 'sm',
+          wrap: true,
+        },
+      ],
+    },
+    footer: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'xs',
+      contents: [
+        {
+          type: 'button',
+          style: 'primary',
+          color: '#06C755',
+          height: 'sm',
+          action: {
+            type: 'uri',
+            label: '📝 進捗を書く',
+            uri: liffUrl,
+          },
+        },
+        {
+          type: 'button',
+          style: 'primary',
+          color: '#10B981',
+          height: 'sm',
+          action: {
+            type: 'postback',
+            label: '🎉 完了報告',
+            data: `action=task_complete_assignee&id=${task.id}`,
+            displayText: `「${task.title}」完了報告`,
+          },
+        },
+      ],
+    },
+  };
+}
+
+// ── 12. 進捗報告 転送カード (依頼者・admin への通知) ───────────────────────────
+export function buildProgressReportNoticeCard(opts: {
+  task: Task;
+  reporterName: string | null;
+  text: string;
+}): unknown {
+  const { task, reporterName, text } = opts;
+  const priority = priorityBadge(task.priority);
+  return {
+    type: 'bubble',
+    size: 'kilo',
+    header: {
+      type: 'box',
+      layout: 'horizontal',
+      contents: [
+        { type: 'text', text: '📝 進捗報告', weight: 'bold', size: 'sm', color: '#1E88E5' },
+        { type: 'text', text: task.display_id, size: 'xs', color: '#06C755', align: 'end' },
+      ],
+    },
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'sm',
+      contents: [
+        {
+          type: 'box',
+          layout: 'baseline',
+          spacing: 'sm',
+          contents: [
+            { type: 'text', text: priority.label, size: 'sm', color: priority.color, flex: 0 },
+            { type: 'text', text: task.title, weight: 'bold', size: 'md', wrap: true, flex: 5 },
+          ],
+        },
+        {
+          type: 'box',
+          layout: 'baseline',
+          spacing: 'sm',
+          contents: [
+            { type: 'text', text: '報告者', size: 'xs', color: '#888888', flex: 1 },
+            { type: 'text', text: reporterName ?? '—', size: 'sm', color: '#333333', flex: 4, wrap: true },
+          ],
+        },
+        { type: 'separator', margin: 'sm' },
+        { type: 'text', text: text, size: 'sm', color: '#333333', margin: 'sm', wrap: true },
+      ],
+    },
+  };
+}
+
+// ── 13. 社員向け日報リマインドカード ────────────────────────────────────────
+// 朝 09:30 JST に 社員 (type:employee) にのみ push。
+// 抱えているアクティブタスクをリスト表示し、各行に「進捗を書く」LIFF ボタン。
+
+export function buildDailyReportCard(opts: {
+  tasks: Task[];
+  liffBaseUrl: string; // hash 用 base e.g. https://liff.line.me/<id>
+}): unknown {
+  const items = opts.tasks.slice(0, 8); // 上限 8 件 (Flex bubble の縦長制約対策)
+  const rows: unknown[] = [];
+  for (const t of items) {
+    const due = formatDate(t.due_at);
+    const remaining = daysRemainingLabel(t.due_at);
+    const priority = priorityBadge(t.priority);
+    rows.push(
+      {
+        type: 'box',
+        layout: 'baseline',
+        spacing: 'sm',
+        contents: [
+          { type: 'text', text: priority.label, size: 'xs', color: priority.color, flex: 0 },
+          { type: 'text', text: t.title, size: 'sm', color: '#333333', wrap: true, flex: 5 },
+        ],
+      },
+      {
+        type: 'box',
+        layout: 'baseline',
+        spacing: 'sm',
+        contents: [
+          { type: 'text', text: '期日', size: 'xxs', color: '#888888', flex: 1 },
+          { type: 'text', text: due, size: 'xxs', color: '#333333', flex: 2 },
+          { type: 'text', text: remaining.label, size: 'xxs', color: remaining.color, flex: 2, align: 'end' },
+        ],
+      },
+      {
+        type: 'button',
+        style: 'secondary',
+        height: 'sm',
+        margin: 'xs',
+        action: {
+          type: 'uri',
+          label: '📝 進捗を書く',
+          uri: `${opts.liffBaseUrl.replace(/#.*$/, '')}#page=progress_report&taskId=${encodeURIComponent(t.id)}`,
+        },
+      },
+      { type: 'separator', margin: 'sm' },
+    );
+  }
+  return {
+    type: 'bubble',
+    size: 'giga',
+    header: {
+      type: 'box',
+      layout: 'vertical',
+      contents: [
+        { type: 'text', text: '☀️ おはようございます', weight: 'bold', size: 'md', color: '#06C755' },
+        {
+          type: 'text',
+          text: `今日の進捗を 1 つずつ報告してください 🙏 (${items.length}件)`,
+          size: 'xs',
+          color: '#666666',
+          wrap: true,
+          margin: 'xs',
+        },
+      ],
+    },
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'sm',
+      contents: rows,
+    },
+  };
+}
+
+// ── 14. 社員/委託 区分 選択カード ────────────────────────────────────────────
+// broadcast (一括) + lazy intercept (任意メッセージ送信時) の両方で利用。
+// reason は文面の微調整 (broadcast 時は再登録の旨を、lazy 時は登録未完了の旨を表示)。
+export function buildMemberTypeChoiceCard(opts: {
+  friendDisplayName: string | null;
+  reason: 'broadcast' | 'lazy';
+}): unknown {
+  const name = opts.friendDisplayName ?? 'お疲れさまです';
+  const intro =
+    opts.reason === 'broadcast'
+      ? '社員 / 委託 の区分を登録するため、下のボタンから選んでください 🙏'
+      : '登録内容に不足があります。社員 / 委託 の区分を選んでください 🙏';
+  return {
+    type: 'bubble',
+    size: 'kilo',
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'md',
+      contents: [
+        { type: 'text', text: `👤 ${name} さん`, weight: 'bold', size: 'md', color: '#06C755', wrap: true },
+        { type: 'text', text: '区分の登録', weight: 'bold', size: 'sm' },
+        { type: 'text', text: intro, size: 'xs', color: '#666666', wrap: true },
+        {
+          type: 'box',
+          layout: 'vertical',
+          spacing: 'xs',
+          margin: 'sm',
+          contents: [
+            {
+              type: 'text',
+              text: '・社員: 日々の進捗を毎日 LINE で報告',
+              size: 'xxs',
+              color: '#555555',
+              wrap: true,
+            },
+            {
+              type: 'text',
+              text: '・委託: タスク期日に応じた進捗報告のみ',
+              size: 'xxs',
+              color: '#555555',
+              wrap: true,
+            },
+          ],
+        },
+      ],
+    },
+    footer: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'xs',
+      contents: [
+        {
+          type: 'button',
+          style: 'primary',
+          color: '#10B981',
+          height: 'sm',
+          action: {
+            type: 'postback',
+            label: '✅ 社員 として登録',
+            data: 'action=set_member_type&value=employee',
+            displayText: '社員 として登録します',
+          },
+        },
+        {
+          type: 'button',
+          style: 'primary',
+          color: '#F59E0B',
+          height: 'sm',
+          action: {
+            type: 'postback',
+            label: '🤝 委託 として登録',
+            data: 'action=set_member_type&value=contractor',
+            displayText: '委託 として登録します',
+          },
+        },
+      ],
+    },
+  };
+}
+
 export function buildLiffOpenBubble(opts: {
   title: string;
   description: string;

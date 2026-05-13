@@ -4,10 +4,14 @@ import {
   getTaskById,
   getTaskByDisplayId,
   listTasks,
+  listStaffMetrics,
   markTaskCompleted,
   markTaskCancelled,
+  markCompletionByAssignee,
+  markCompletionByRequester,
   reportTaskDelay,
   reportTaskProblem,
+  updateTaskFields,
   appendTaskEvent,
   listTaskEvents,
   incrementStaffMetric,
@@ -18,9 +22,16 @@ import {
   type Task,
   type Friend,
   type TaskStatus,
+  type TaskPriority,
 } from '@line-crm/db';
 import { LineClient } from '@line-crm/line-sdk';
-import { buildTaskCard, buildProblemReportCard } from '../services/task-flex.js';
+import {
+  buildTaskCard,
+  buildProblemReportCard,
+  buildProgressReportNoticeCard,
+  buildCompletionApprovalCard,
+  buildCompletionNoticeCard,
+} from '../services/task-flex.js';
 import type { Env } from '../index.js';
 
 // =============================================================================
@@ -44,6 +55,7 @@ function serializeTask(t: Task) {
     assigneeFriendId: t.assignee_friend_id,
     dueAt: t.due_at,
     status: t.status,
+    priority: t.priority,
     startedAt: t.started_at,
     completedAt: t.completed_at,
     postponeCount: t.postpone_count,
@@ -58,6 +70,11 @@ function serializeTask(t: Task) {
     problemResolvedAssigneeAt: t.problem_resolved_assignee_at,
     problemResolvedRequesterAt: t.problem_resolved_requester_at,
   };
+}
+
+function normalizePriority(input: unknown): TaskPriority {
+  if (input === 'high' || input === 'medium' || input === 'low') return input;
+  return 'medium';
 }
 
 async function friendHasAdminRole(db: D1Database, friendId: string): Promise<boolean> {
@@ -364,6 +381,7 @@ tasks.post('/api/liff/tasks', async (c) => {
       title: string;
       dueAt: string;
       description?: string | null;
+      priority?: string;
     }>();
     if (!body.lineUserId) return c.json({ success: false, error: 'lineUserId required' }, 400);
     if (!body.assigneeFriendId) return c.json({ success: false, error: 'assigneeFriendId required' }, 400);
@@ -382,6 +400,7 @@ tasks.post('/api/liff/tasks', async (c) => {
       assignee_friend_id: assignee.id,
       due_at: body.dueAt,
       line_account_id: requester.line_account_id ?? assignee.line_account_id ?? null,
+      priority: normalizePriority(body.priority),
     });
 
     await pushTaskAssignedNotice(c.env, task, assignee);
@@ -389,6 +408,85 @@ tasks.post('/api/liff/tasks', async (c) => {
     return c.json({ success: true, data: serializeTask(task) });
   } catch (err) {
     console.error('POST /api/liff/tasks error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+/**
+ * POST /api/liff/tasks/:id/progress — 進捗報告 (中間 / 1-3 / 2-3 リマインドのカード経由)
+ *
+ * Body:
+ *   lineUserId  進捗を送る担当者の LINE userId
+ *   text        進捗メモ (空不可)
+ *
+ * 担当者本人 + admin のみ送信可。
+ * 送信時に reported_on_time_count を +1 し、依頼者 + admin に Flex で転送する。
+ */
+tasks.post('/api/liff/tasks/:id/progress', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json<{ lineUserId: string; text: string }>();
+    if (!body.lineUserId) return c.json({ success: false, error: 'lineUserId required' }, 400);
+    if (!body.text?.trim()) return c.json({ success: false, error: 'text required' }, 400);
+    const actor = await getFriendByLineUserId(c.env.DB, body.lineUserId);
+    if (!actor) return c.json({ success: false, error: 'actor not registered as friend' }, 404);
+    const cur = await getTaskById(c.env.DB, id);
+    if (!cur) return c.json({ success: false, error: 'Task not found' }, 404);
+    const isAdmin = await friendHasAdminRole(c.env.DB, actor.id);
+    if (!isAdmin && actor.id !== cur.assignee_friend_id) {
+      return c.json({ success: false, error: '担当者のみ進捗報告できます' }, 403);
+    }
+    const text = body.text.trim().slice(0, 1000);
+    await appendTaskEvent(c.env.DB, {
+      task_id: id,
+      event_type: 'progress_reported',
+      actor_friend_id: actor.id,
+      payload: { text },
+    });
+    await incrementStaffMetric(c.env.DB, actor.id, 'reported_on_time_count');
+
+    // 依頼者 + admin (担当者本人と申告者を除く) に push
+    try {
+      const lineClient = new LineClient(c.env.LINE_CHANNEL_ACCESS_TOKEN);
+      const requester = await getFriendById(c.env.DB, cur.requester_friend_id);
+      const targets = new Map<string, Friend>();
+      if (requester && requester.line_user_id && requester.id !== actor.id) {
+        targets.set(requester.id, requester);
+      }
+      const admins = await c.env.DB
+        .prepare(
+          `SELECT f.* FROM friends f
+           INNER JOIN friend_tags ft ON ft.friend_id = f.id
+           INNER JOIN tags t ON t.id = ft.tag_id
+           WHERE t.name = ? AND f.is_following = 1`,
+        )
+        .bind(ADMIN_TAG_NAME)
+        .all<Friend>();
+      for (const a of admins.results) {
+        if (!a.line_user_id) continue;
+        if (a.id === actor.id) continue;
+        if (a.id === cur.assignee_friend_id) continue;
+        targets.set(a.id, a);
+      }
+      const altText = `📝 ${actor.display_name ?? '担当者'}「${cur.title}」の進捗`;
+      const card = buildProgressReportNoticeCard({
+        task: cur,
+        reporterName: actor.display_name ?? null,
+        text,
+      });
+      for (const t of targets.values()) {
+        try {
+          await lineClient.pushFlexMessage(t.line_user_id!, altText, card as never);
+        } catch (err) {
+          console.error('progress_reported push failed', { friendId: t.id, err });
+        }
+      }
+    } catch (err) {
+      console.error('progress_reported push wrapper failed', err);
+    }
+    return c.json({ success: true });
+  } catch (err) {
+    console.error('POST /api/liff/tasks/:id/progress error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
@@ -550,6 +648,329 @@ tasks.get('/api/liff/tasks', async (c) => {
     });
   } catch (err) {
     console.error('GET /api/liff/tasks error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+// ── プロジェクト一覧 LIFF からのタスク操作 ────────────────────────────────────
+//
+// すべて lineUserId + taskId 必須。actor を friend として解決し、権限を判定する。
+// 権限:
+//   PATCH    /api/liff/tasks/:id            requester or admin
+//   POST     /api/liff/tasks/:id/complete   assignee/requester/admin (kind 自動判定 or 明示)
+//   POST     /api/liff/tasks/:id/postpone   assignee or admin
+//   POST     /api/liff/tasks/:id/cancel     requester or admin
+
+async function resolveActor(c: { env: Env['Bindings']; req: { json: () => Promise<unknown> } }) {
+  const body = (await c.req.json()) as Record<string, unknown>;
+  const lineUserId = String(body.lineUserId ?? '');
+  if (!lineUserId) return { error: 'lineUserId required', body: null, actor: null };
+  const actor = await getFriendByLineUserId(c.env.DB, lineUserId);
+  if (!actor) return { error: 'actor not registered as friend', body: null, actor: null };
+  return { error: null, body, actor };
+}
+
+/** PATCH /api/liff/tasks/:id — タイトル / メモ / 期日 / 優先度 編集 */
+tasks.patch('/api/liff/tasks/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const { error, body, actor } = await resolveActor(c);
+    if (error || !body || !actor) return c.json({ success: false, error: error ?? 'bad request' }, 400);
+    const cur = await getTaskById(c.env.DB, id);
+    if (!cur) return c.json({ success: false, error: 'Task not found' }, 404);
+    const isAdmin = await friendHasAdminRole(c.env.DB, actor.id);
+    if (!isAdmin && actor.id !== cur.requester_friend_id) {
+      return c.json({ success: false, error: '編集権限がありません (依頼者 or admin のみ)' }, 403);
+    }
+    const updated = await updateTaskFields(c.env.DB, id, actor.id, {
+      title: typeof body.title === 'string' ? (body.title as string) : undefined,
+      description:
+        body.description === null
+          ? null
+          : typeof body.description === 'string'
+            ? (body.description as string)
+            : undefined,
+      due_at: typeof body.dueAt === 'string' ? (body.dueAt as string) : undefined,
+      priority:
+        body.priority === 'high' || body.priority === 'medium' || body.priority === 'low'
+          ? (body.priority as TaskPriority)
+          : undefined,
+    });
+    return c.json({ success: true, data: updated ? serializeTask(updated) : null });
+  } catch (err) {
+    console.error('PATCH /api/liff/tasks/:id error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+/** POST /api/liff/tasks/:id/complete — 担当者 or 依頼者の片側完了マーク */
+tasks.post('/api/liff/tasks/:id/complete', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const { error, body, actor } = await resolveActor(c);
+    if (error || !body || !actor) return c.json({ success: false, error: error ?? 'bad request' }, 400);
+    const cur = await getTaskById(c.env.DB, id);
+    if (!cur) return c.json({ success: false, error: 'Task not found' }, 404);
+    const isAdmin = await friendHasAdminRole(c.env.DB, actor.id);
+    const isAssignee = actor.id === cur.assignee_friend_id;
+    const isRequester = actor.id === cur.requester_friend_id;
+    let kind: 'assignee' | 'requester' | null =
+      body.kind === 'assignee' || body.kind === 'requester' ? (body.kind as 'assignee' | 'requester') : null;
+    if (!kind) {
+      if (isAssignee) kind = 'assignee';
+      else if (isRequester) kind = 'requester';
+      else if (isAdmin) kind = 'assignee';
+      else return c.json({ success: false, error: '権限がありません' }, 403);
+    }
+    if (kind === 'assignee' && !(isAssignee || isAdmin)) {
+      return c.json({ success: false, error: '担当者用の操作です' }, 403);
+    }
+    if (kind === 'requester' && !(isRequester || isAdmin)) {
+      return c.json({ success: false, error: '依頼者用の操作です' }, 403);
+    }
+    const result =
+      kind === 'assignee'
+        ? await markCompletionByAssignee(c.env.DB, id, actor.id)
+        : await markCompletionByRequester(c.env.DB, id, actor.id);
+    if (kind === 'assignee' && !result.alreadyMarked && isTimeBefore(jstNow(), cur.due_at)) {
+      await incrementStaffMetric(c.env.DB, actor.id, 'reported_on_time_count');
+    }
+    const updated = result.task ?? cur;
+    // push 通知 (相手側 or 双方)
+    try {
+      const lineClient = new LineClient(c.env.LINE_CHANNEL_ACCESS_TOKEN);
+      const assignee = await getFriendById(c.env.DB, cur.assignee_friend_id);
+      const requester = await getFriendById(c.env.DB, cur.requester_friend_id);
+      if (result.finalized) {
+        const elapsed = Math.max(
+          1,
+          Math.ceil((Date.now() - new Date(cur.created_at).getTime()) / (24 * 60 * 60_000)),
+        );
+        const card = buildCompletionNoticeCard(updated, assignee?.display_name ?? null, elapsed);
+        const altText = `「${cur.title}」が完了しました`;
+        const targets = [assignee, requester].filter(
+          (f): f is Friend => !!f && !!f.line_user_id && f.line_user_id !== actor.line_user_id,
+        );
+        for (const t of targets) {
+          try {
+            await lineClient.pushFlexMessage(t.line_user_id!, altText, card as never);
+          } catch (err) {
+            console.error('completion finalized push failed', { friendId: t.id, err });
+          }
+        }
+      } else if (!result.alreadyMarked) {
+        if (kind === 'assignee') {
+          if (requester && requester.line_user_id && requester.line_user_id !== actor.line_user_id) {
+            await lineClient.pushFlexMessage(
+              requester.line_user_id,
+              `「${cur.title}」の完了承認をお願いします`,
+              buildCompletionApprovalCard({
+                task: updated,
+                assigneeName: assignee?.display_name ?? null,
+                requesterName: requester.display_name ?? null,
+                kind: 'assignee_first',
+              }) as never,
+            );
+          }
+        } else {
+          if (assignee && assignee.line_user_id && assignee.line_user_id !== actor.line_user_id) {
+            await lineClient.pushFlexMessage(
+              assignee.line_user_id,
+              `「${cur.title}」の事前承認が届きました`,
+              buildCompletionApprovalCard({
+                task: updated,
+                assigneeName: assignee.display_name ?? null,
+                requesterName: requester?.display_name ?? null,
+                kind: 'requester_first',
+              }) as never,
+            );
+          }
+        }
+      }
+    } catch (err) {
+      console.error('completion push wrapper failed', err);
+    }
+    return c.json({
+      success: true,
+      data: { task: serializeTask(updated), finalized: result.finalized, alreadyMarked: result.alreadyMarked, kind },
+    });
+  } catch (err) {
+    console.error('POST /api/liff/tasks/:id/complete error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+/** POST /api/liff/tasks/:id/postpone — 遅延報告 (+N日)、担当者 or admin */
+tasks.post('/api/liff/tasks/:id/postpone', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const { error, body, actor } = await resolveActor(c);
+    if (error || !body || !actor) return c.json({ success: false, error: error ?? 'bad request' }, 400);
+    const cur = await getTaskById(c.env.DB, id);
+    if (!cur) return c.json({ success: false, error: 'Task not found' }, 404);
+    const isAdmin = await friendHasAdminRole(c.env.DB, actor.id);
+    if (!isAdmin && actor.id !== cur.assignee_friend_id) {
+      return c.json({ success: false, error: '担当者 or admin のみ遅延報告できます' }, 403);
+    }
+    const days = Number(body.days ?? 0);
+    if (!Number.isFinite(days) || days < 1 || days > 30) {
+      return c.json({ success: false, error: 'days must be 1-30' }, 400);
+    }
+    const updated = await reportTaskDelay(c.env.DB, id, actor.id, days);
+    await incrementStaffMetric(c.env.DB, actor.id, 'delay_report_count');
+    return c.json({ success: true, data: updated ? serializeTask(updated) : null });
+  } catch (err) {
+    console.error('POST /api/liff/tasks/:id/postpone error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+/** POST /api/liff/tasks/:id/cancel — 取消、依頼者 or admin */
+tasks.post('/api/liff/tasks/:id/cancel', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const { error, body, actor } = await resolveActor(c);
+    if (error || !body || !actor) return c.json({ success: false, error: error ?? 'bad request' }, 400);
+    const cur = await getTaskById(c.env.DB, id);
+    if (!cur) return c.json({ success: false, error: 'Task not found' }, 404);
+    const isAdmin = await friendHasAdminRole(c.env.DB, actor.id);
+    if (!isAdmin && actor.id !== cur.requester_friend_id) {
+      return c.json({ success: false, error: '依頼者 or admin のみ取消できます' }, 403);
+    }
+    const reason = typeof body.reason === 'string' ? (body.reason as string).slice(0, 500) : null;
+    const updated = await markTaskCancelled(c.env.DB, id, actor.id, reason ?? undefined);
+    return c.json({ success: true, data: updated ? serializeTask(updated) : null });
+  } catch (err) {
+    console.error('POST /api/liff/tasks/:id/cancel error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+/**
+ * GET /api/liff/projects?lineUserId=...&tab=mine|all|done|active|metrics
+ *
+ * プロジェクト一覧ページ専用エンドポイント。タブごとに最適化された結果を返す。
+ *
+ *   mine    自分の assignee + requester (全 status)
+ *   all     全タスク (admin only) — pending/in_progress/delayed/problem
+ *   done    完了タスク — admin=全件, staff=自分が assignee or requester
+ *   active  進行中タスク (pending/in_progress/delayed/problem) — 同上
+ *   metrics 全 staff_metrics + display_name (admin only)
+ *
+ * staff が all / metrics をリクエストすると 403。
+ */
+tasks.get('/api/liff/projects', async (c) => {
+  try {
+    const lineUserId = c.req.query('lineUserId');
+    if (!lineUserId) return c.json({ success: false, error: 'lineUserId required' }, 400);
+    const me = await getFriendByLineUserId(c.env.DB, lineUserId);
+    if (!me) return c.json({ success: false, error: 'not registered as friend' }, 404);
+    const isAdmin = await friendHasAdminRole(c.env.DB, me.id);
+    const tab = c.req.query('tab') ?? 'mine';
+
+    if ((tab === 'all' || tab === 'metrics') && !isAdmin) {
+      return c.json({ success: false, error: 'admin only' }, 403);
+    }
+
+    const namesMap = new Map<string, string | null>();
+    async function attachNames(rows: Task[]) {
+      const ids = new Set<string>();
+      for (const t of rows) {
+        ids.add(t.assignee_friend_id);
+        ids.add(t.requester_friend_id);
+      }
+      for (const id of ids) {
+        if (namesMap.has(id)) continue;
+        const f = await getFriendById(c.env.DB, id);
+        namesMap.set(id, f?.display_name ?? null);
+      }
+    }
+    function withNames(rows: Task[]) {
+      return rows.map((t) => ({
+        ...serializeTask(t),
+        assigneeName: namesMap.get(t.assignee_friend_id) ?? null,
+        requesterName: namesMap.get(t.requester_friend_id) ?? null,
+      }));
+    }
+
+    if (tab === 'metrics') {
+      const rows = await listStaffMetrics(c.env.DB);
+      const detailed = await Promise.all(
+        rows.map(async (r) => {
+          const f = await getFriendById(c.env.DB, r.friend_id);
+          return {
+            friendId: r.friend_id,
+            displayName: f?.display_name ?? null,
+            noReportCount: r.no_report_count,
+            reportedOnTimeCount: r.reported_on_time_count,
+            delayReportCount: r.delay_report_count,
+          };
+        }),
+      );
+      return c.json({
+        success: true,
+        data: detailed,
+        me: { friendId: me.id, isAdmin: true },
+      });
+    }
+
+    if (tab === 'all') {
+      const items = await listTasks(c.env.DB, {
+        statuses: ['pending', 'in_progress', 'delayed', 'problem'],
+        limit: 500,
+      });
+      await attachNames(items);
+      return c.json({
+        success: true,
+        data: withNames(items),
+        me: { friendId: me.id, isAdmin: true },
+      });
+    }
+
+    if (tab === 'done') {
+      const allDone = await listTasks(c.env.DB, { statuses: ['done'], limit: 200 });
+      const items = isAdmin
+        ? allDone
+        : allDone.filter(
+            (t) => t.assignee_friend_id === me.id || t.requester_friend_id === me.id,
+          );
+      // 完了日 降順
+      items.sort((a, b) => (b.completed_at ?? '').localeCompare(a.completed_at ?? ''));
+      await attachNames(items);
+      return c.json({ success: true, data: withNames(items), me: { friendId: me.id, isAdmin } });
+    }
+
+    if (tab === 'active') {
+      const allActive = await listTasks(c.env.DB, {
+        statuses: ['in_progress', 'delayed'],
+        limit: 300,
+      });
+      const items = isAdmin
+        ? allActive
+        : allActive.filter(
+            (t) => t.assignee_friend_id === me.id || t.requester_friend_id === me.id,
+          );
+      await attachNames(items);
+      return c.json({ success: true, data: withNames(items), me: { friendId: me.id, isAdmin } });
+    }
+
+    // default: mine — 自分が assignee or requester
+    const mineAsAssignee = await listTasks(c.env.DB, {
+      assignee_friend_id: me.id,
+      statuses: ['pending', 'in_progress', 'delayed', 'problem'],
+    });
+    const mineAsRequester = await listTasks(c.env.DB, {
+      requester_friend_id: me.id,
+      statuses: ['pending', 'in_progress', 'delayed', 'problem'],
+    });
+    const map = new Map<string, Task>();
+    for (const t of mineAsAssignee) map.set(t.id, t);
+    for (const t of mineAsRequester) map.set(t.id, t);
+    const items = Array.from(map.values());
+    await attachNames(items);
+    return c.json({ success: true, data: withNames(items), me: { friendId: me.id, isAdmin } });
+  } catch (err) {
+    console.error('GET /api/liff/projects error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });

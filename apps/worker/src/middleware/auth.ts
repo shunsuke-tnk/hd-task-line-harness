@@ -29,7 +29,9 @@ export async function authMiddleware(c: Context<Env>, next: Next): Promise<Respo
     // LIFF page paths — served as static SPA assets (no API auth required)
     path === '/task_request' ||
     path === '/task_problem' ||
-    path === '/request_or_propose'
+    path === '/request_or_propose' ||
+    path === '/projects' ||
+    path === '/progress_report'
   ) {
     return next();
   }

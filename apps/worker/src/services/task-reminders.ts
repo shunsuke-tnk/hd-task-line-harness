@@ -13,23 +13,45 @@
 import type { LineClient } from '@line-crm/line-sdk';
 import {
   listOverdueUnalertedTasks,
+  listTasks,
   listTasksDueBetween,
   markOverdueAlerted,
   appendTaskEvent,
+  hasTaskEventOfType,
   incrementStaffMetric,
   getFriendById,
+  parseFriendMetadata,
+  updateFriendMetadata,
   toJstString,
   jstNow,
   type Task,
+  type Friend,
 } from '@line-crm/db';
-import { buildReminderCard, flexMessage } from './task-flex.js';
+import {
+  buildReminderCard,
+  buildProgressReminderCard,
+  buildDailyReportCard,
+  flexMessage,
+} from './task-flex.js';
 
 const ADMIN_TAG_NAME = 'role:admin';
+const EMPLOYEE_TAG_NAME = 'type:employee';
+const DAY_MS = 24 * 60 * 60_000;
 
 interface RunOptions {
   /** 強制的にリマインダー時刻を上書き (テスト用)。指定なければ現在時刻 (JST) で判断。 */
   forceHour?: number;
   forceMinute?: number;
+  /** LIFF base URL (例 https://liff.line.me/<LIFF_ID>)。進捗報告ボタンの URI 組立に使用。 */
+  liffBaseUrl?: string;
+}
+
+/** 環境変数フォールバック付きで LIFF base URL を解決。 */
+function resolveLiffBaseUrl(opts: RunOptions): string {
+  if (opts.liffBaseUrl) return opts.liffBaseUrl;
+  // デフォルト: 本番 LIFF (LIFF_ID は wrangler.toml の VITE_LIFF_ID と同じ値)。
+  // VITE_LIFF_ID は build-time なのでここで参照できない → ハードコードのフォールバック。
+  return 'https://liff.line.me/2009971783-Szm9bLIC';
 }
 
 /**
@@ -65,12 +87,26 @@ export async function processTaskReminders(
     }
   }
 
-  // 3) 期日当日リマインド (09:00-09:04 のみ)
+  // 3) 期日当日リマインド (09:00-09:04 のみ) + 進捗リマインド (同時刻に発火)
   if (hour === 9 && minute < 5) {
     try {
       await runDayOfReminder(db, lineClient);
     } catch (err) {
       console.error('runDayOfReminder error', err);
+    }
+    try {
+      await runProgressReminder(db, lineClient, resolveLiffBaseUrl(opts));
+    } catch (err) {
+      console.error('runProgressReminder error', err);
+    }
+  }
+
+  // 4) 社員向け日報リマインド (09:30-09:34、当日リマインドと 30 分ずらし衝突回避)
+  if (hour === 9 && minute >= 25 && minute < 35) {
+    try {
+      await runEmployeeDailyReport(db, lineClient, resolveLiffBaseUrl(opts));
+    } catch (err) {
+      console.error('runEmployeeDailyReport error', err);
     }
   }
 }
@@ -187,5 +223,145 @@ async function safePush(
     await lineClient.pushMessage(toUserId, [msg as never]);
   } catch (err) {
     console.error(`task reminder push failed (kind=${kind}, taskId=${task.id})`, err);
+  }
+}
+
+// ── 進捗リマインド (中間 / 1-3 / 2-3) ─────────────────────────────────────────
+//
+// 期日まで日数 D = floor((due_at - created_at) / day)、経過 elapsed = floor((now - created_at) / day)
+//   D <= 5  : 進捗リマインド無し (前日/当日のみ)
+//   D 6-8   : elapsed == ceil(D/2) で 1 回
+//   D >= 9  : elapsed == ceil(D/3) と elapsed == ceil(2D/3) で 2 回
+//
+// 冪等性: task_id × event_type で task_events を引いて重複送信防止。
+
+async function runProgressReminder(
+  db: D1Database,
+  lineClient: LineClient,
+  liffBaseUrl: string,
+): Promise<void> {
+  const nowMs = Date.now();
+  const tasks = await listTasks(db, {
+    statuses: ['pending', 'in_progress', 'delayed'],
+    limit: 500,
+  });
+  for (const task of tasks) {
+    const createdMs = new Date(task.created_at).getTime();
+    const dueMs = new Date(task.due_at).getTime();
+    if (!Number.isFinite(createdMs) || !Number.isFinite(dueMs)) continue;
+    if (dueMs <= nowMs) continue; // 期日超過は overdueAlert 側で扱う
+    const totalDays = Math.floor((dueMs - createdMs) / DAY_MS);
+    if (totalDays < 6) continue;
+    const elapsedDays = Math.floor((nowMs - createdMs) / DAY_MS);
+
+    if (totalDays >= 6 && totalDays <= 8) {
+      const target = Math.ceil(totalDays / 2);
+      if (elapsedDays === target) {
+        await maybeSendProgress(db, lineClient, task, liffBaseUrl, 'progress_reminder_first', 'mid');
+      }
+    } else if (totalDays >= 9) {
+      const t1 = Math.ceil(totalDays / 3);
+      const t2 = Math.ceil((2 * totalDays) / 3);
+      if (elapsedDays === t1) {
+        await maybeSendProgress(db, lineClient, task, liffBaseUrl, 'progress_reminder_first', 'first');
+      } else if (elapsedDays === t2) {
+        await maybeSendProgress(db, lineClient, task, liffBaseUrl, 'progress_reminder_second', 'second');
+      }
+    }
+  }
+}
+
+async function maybeSendProgress(
+  db: D1Database,
+  lineClient: LineClient,
+  task: Task,
+  liffBaseUrl: string,
+  eventType: 'progress_reminder_first' | 'progress_reminder_second',
+  kind: 'mid' | 'first' | 'second',
+): Promise<void> {
+  const already = await hasTaskEventOfType(db, task.id, eventType);
+  if (already) return;
+  const assignee = await getFriendById(db, task.assignee_friend_id);
+  if (!assignee?.line_user_id) return;
+  const liffUrl = `${liffBaseUrl.replace(/#.*$/, '')}#page=progress_report&taskId=${encodeURIComponent(task.id)}`;
+  const card = buildProgressReminderCard({
+    task,
+    assigneeName: assignee.display_name ?? null,
+    liffUrl,
+    kind,
+  });
+  const altText =
+    kind === 'mid'
+      ? `🟡 中間進捗を共有してください: ${task.title}`
+      : kind === 'first'
+        ? `📍 1/3 経過、進捗を共有してください: ${task.title}`
+        : `📍 2/3 経過、進捗を共有してください: ${task.title}`;
+  try {
+    await lineClient.pushMessage(assignee.line_user_id, [flexMessage(altText, card) as never]);
+  } catch (err) {
+    console.error(`progress reminder push failed (taskId=${task.id})`, err);
+    return; // event_type は記録しない (再試行可)
+  }
+  await appendTaskEvent(db, {
+    task_id: task.id,
+    event_type: eventType,
+    actor_friend_id: null,
+    payload: { kind, sent_at: jstNow() },
+  });
+}
+
+// ── 社員向け日報リマインド (毎朝 09:30 JST) ──────────────────────────────────
+//
+// type:employee タグを持つ active friend に対し、その人の active タスク一覧を含む
+// Flex カードを 1 通送る。dedup は friends.metadata.last_daily_report_request_at で行う
+// (JST 日付文字列の同日比較)。
+
+function jstDateString(d: Date = new Date()): string {
+  const jst = new Date(d.getTime() + 9 * 60 * 60_000);
+  const y = jst.getUTCFullYear();
+  const m = String(jst.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(jst.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
+
+async function runEmployeeDailyReport(
+  db: D1Database,
+  lineClient: LineClient,
+  liffBaseUrl: string,
+): Promise<void> {
+  const today = jstDateString();
+  const employees = await db
+    .prepare(
+      `SELECT DISTINCT f.* FROM friends f
+       INNER JOIN friend_tags ft ON ft.friend_id = f.id
+       INNER JOIN tags t ON t.id = ft.tag_id
+       WHERE t.name = ? AND f.is_following = 1`,
+    )
+    .bind(EMPLOYEE_TAG_NAME)
+    .all<Friend>();
+
+  for (const friend of employees.results) {
+    if (!friend.line_user_id) continue;
+    const meta = parseFriendMetadata(friend);
+    if (meta['last_daily_report_request_at'] === today) continue;
+    const active = await listTasks(db, {
+      assignee_friend_id: friend.id,
+      statuses: ['pending', 'in_progress', 'delayed', 'problem'],
+      limit: 50,
+    });
+    if (active.length === 0) continue;
+    const card = buildDailyReportCard({ tasks: active, liffBaseUrl });
+    try {
+      await lineClient.pushMessage(
+        friend.line_user_id,
+        [flexMessage(`☀️ 今日の進捗 (${active.length}件)`, card) as never],
+      );
+    } catch (err) {
+      console.error(`daily_report push failed (friendId=${friend.id})`, err);
+      continue;
+    }
+    await updateFriendMetadata(db, friend.id, {
+      last_daily_report_request_at: today,
+    });
   }
 }

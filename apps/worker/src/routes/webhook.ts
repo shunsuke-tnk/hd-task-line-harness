@@ -332,6 +332,59 @@ async function handleEvent(
       .bind(logId, friend.id, incomingText, now)
       .run();
 
+    // ── lazy intercept: 社員/委託 区分が未登録の HD スタッフに登録カードを返信 ──
+    // 条件:
+    //   - role:admin or role:staff タグあり
+    //   - type:employee も type:contractor も無し
+    //   - friends.metadata.member_type_prompt_sent_at が 24h より前 (or 未送信)
+    // -> reply で choice card を返して return (auto_replies/scenario には進ませない)
+    try {
+      const tagsRow = await db
+        .prepare(
+          `SELECT
+             SUM(CASE WHEN t.name IN ('role:admin','role:staff') THEN 1 ELSE 0 END) AS role_count,
+             SUM(CASE WHEN t.name IN ('type:employee','type:contractor') THEN 1 ELSE 0 END) AS type_count
+           FROM friend_tags ft
+           INNER JOIN tags t ON t.id = ft.tag_id
+           WHERE ft.friend_id = ?`,
+        )
+        .bind(friend.id)
+        .first<{ role_count: number | null; type_count: number | null }>();
+      const hasRole = (tagsRow?.role_count ?? 0) > 0;
+      const hasType = (tagsRow?.type_count ?? 0) > 0;
+      if (hasRole && !hasType) {
+        const meta = JSON.parse(friend.metadata || '{}');
+        const lastAt = typeof meta.member_type_prompt_sent_at === 'string'
+          ? meta.member_type_prompt_sent_at
+          : null;
+        const lastMs = lastAt ? new Date(lastAt).getTime() : 0;
+        const cooledDown = !lastMs || Date.now() - lastMs > 24 * 60 * 60_000;
+        if (cooledDown) {
+          const { buildMemberTypeChoiceCard } = await import('../services/task-flex.js');
+          const card = buildMemberTypeChoiceCard({
+            friendDisplayName: friend.display_name ?? null,
+            reason: 'lazy',
+          });
+          try {
+            await lineClient.replyMessage(event.replyToken, [
+              { type: 'flex', altText: '👋 社員 / 委託 区分の登録', contents: card } as never,
+            ]);
+            meta.member_type_prompt_sent_at = new Date().toISOString();
+            await db
+              .prepare('UPDATE friends SET metadata = ?, updated_at = ? WHERE id = ?')
+              .bind(JSON.stringify(meta), jstNow(), friend.id)
+              .run();
+            return;
+          } catch (err) {
+            console.error('lazy member_type prompt reply failed', err);
+            // 失敗時は通常フローに進む
+          }
+        }
+      }
+    } catch (err) {
+      console.error('lazy member_type intercept check failed', err);
+    }
+
     // チャット unread 判定は auto_replies マッチ結果 (matched) を使う。
     // ハードコードキーワードリストは廃止 — auto_replies テーブルが single source of truth。
     const isTimeCommand = /(?:配信時間|配信|届けて|通知)[はを]?\s*\d{1,2}\s*時/.test(incomingText);

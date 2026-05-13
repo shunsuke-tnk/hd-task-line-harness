@@ -11,8 +11,10 @@ import {
   jstNow,
 } from '@line-crm/db';
 import type { Friend as DbFriend, Tag as DbTag } from '@line-crm/db';
+import { LineClient } from '@line-crm/line-sdk';
 import { fireEvent } from '../services/event-bus.js';
 import { buildMessage } from '../services/step-delivery.js';
+import { buildMemberTypeChoiceCard, flexMessage } from '../services/task-flex.js';
 import type { Env } from '../index.js';
 
 const friends = new Hono<Env>();
@@ -355,6 +357,67 @@ friends.post('/api/friends/:id/messages', async (c) => {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error('POST /api/friends/:id/messages error:', errMsg);
     return c.json({ success: false, error: errMsg }, 500);
+  }
+});
+
+/**
+ * POST /api/friends/broadcast-member-type-card
+ *
+ * 既存メンバー (role:admin or role:staff タグ持ち) のうち、
+ * type:employee も type:contractor も未付与の friend に
+ * 「あなたは社員 / 委託 どちらですか?」Flex を 1on1 push する。
+ *
+ * Bearer (admin API key) 認証 + 田中・光さんの admin Rich Menu「再登録カードを全員に送る」postback 経由で呼び出される。
+ *
+ * Body: {} (引数なし、role + type 条件で自動的に対象を絞り込む)
+ */
+friends.post('/api/friends/broadcast-member-type-card', async (c) => {
+  try {
+    const db = c.env.DB;
+    const result = await db
+      .prepare(
+        `SELECT f.* FROM friends f
+         WHERE f.is_following = 1
+           AND EXISTS (
+             SELECT 1 FROM friend_tags ft
+             INNER JOIN tags t ON t.id = ft.tag_id
+             WHERE ft.friend_id = f.id AND t.name IN ('role:admin','role:staff')
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM friend_tags ft
+             INNER JOIN tags t ON t.id = ft.tag_id
+             WHERE ft.friend_id = f.id AND t.name IN ('type:employee','type:contractor')
+           )`,
+      )
+      .all<DbFriend>();
+
+    const lineClient = new LineClient(c.env.LINE_CHANNEL_ACCESS_TOKEN);
+    let sent = 0;
+    const failed: Array<{ friendId: string; error: string }> = [];
+    for (const f of result.results) {
+      if (!f.line_user_id) continue;
+      try {
+        const card = buildMemberTypeChoiceCard({
+          friendDisplayName: f.display_name ?? null,
+          reason: 'broadcast',
+        });
+        await lineClient.pushFlexMessage(
+          f.line_user_id,
+          '👋 社員 / 委託 区分の登録',
+          card as never,
+        );
+        sent++;
+      } catch (err) {
+        failed.push({ friendId: f.id, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    return c.json({
+      success: true,
+      data: { targeted: result.results.length, sent, failed },
+    });
+  } catch (err) {
+    console.error('POST /api/friends/broadcast-member-type-card error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
 

@@ -63,7 +63,14 @@ function getPage(): string | null {
   }
   // 2) path 形式 (https://liff.line.me/<LIFF_ID>/task_request)
   const path = window.location.pathname.replace(/^\/+/, '').replace(/\/+$/, '');
-  const knownPages = new Set(['book', 'task_request', 'task_problem', 'request_or_propose']);
+  const knownPages = new Set([
+    'book',
+    'task_request',
+    'task_problem',
+    'request_or_propose',
+    'projects',
+    'progress_report',
+  ]);
   if (knownPages.has(path)) return path;
   // 3) クエリ形式 (?page=task_request) — 後方互換
   const params = new URLSearchParams(window.location.search);
@@ -348,10 +355,19 @@ async function main() {
       const params = new URLSearchParams(window.location.search);
       const formId = params.get('id');
       await initForm(formId);
-    } else if (page && (page === 'task_request' || page === 'task_problem' || page === 'request_or_propose')) {
+    } else if (
+      page &&
+      (page === 'task_request' ||
+        page === 'task_problem' ||
+        page === 'request_or_propose' ||
+        page === 'progress_report')
+    ) {
       // HD TaskBot LIFF forms
       const handled = await dispatchTaskPage(page);
       if (!handled) await linkAndAddFlow();
+    } else if (page === 'projects') {
+      const { initProjects } = await import('./projects.js');
+      await initProjects();
     } else if (!page) {
       await linkAndAddFlow();
     } else {
