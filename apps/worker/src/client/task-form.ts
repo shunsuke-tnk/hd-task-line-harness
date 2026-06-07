@@ -239,6 +239,11 @@ export async function initTaskRequestPage(lineUserId: string) {
           <label class="form-label" for="description">補足メモ (任意)</label>
           <textarea class="form-textarea" id="description" name="description" maxlength="500" placeholder="背景や合格条件など"></textarea>
         </div>
+        <div class="form-row">
+          <label class="form-label" for="files">添付ファイル (任意)</label>
+          <input class="form-input" id="files" name="files" type="file" multiple />
+          <div class="form-help">画像・PDF・資料など。最大5件 / 1件10MBまで</div>
+        </div>
         <button type="submit" class="form-submit" id="submit-btn">依頼する</button>
       </form>
     </div>
@@ -260,6 +265,41 @@ export async function initTaskRequestPage(lineUserId: string) {
     submitBtn.textContent = '送信中…';
     try {
       const fd = new FormData(form);
+
+      // 添付ファイルを先にアップロードしてキーを集める
+      const fileInput = document.getElementById('files') as HTMLInputElement | null;
+      const files = fileInput?.files ? Array.from(fileInput.files) : [];
+      if (files.length > 5) {
+        showError(form, '添付は最大5件までです');
+        submitBtn.disabled = false;
+        submitBtn.textContent = '依頼する';
+        return;
+      }
+      const attachments: Array<{ key: string; fileName: string; mimeType: string; size: number }> = [];
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        if (f.size > 10 * 1024 * 1024) {
+          showError(form, `「${f.name}」は10MBを超えています`);
+          submitBtn.disabled = false;
+          submitBtn.textContent = '依頼する';
+          return;
+        }
+        submitBtn.textContent = `添付を送信中… (${i + 1}/${files.length})`;
+        const up = new FormData();
+        up.append('file', f);
+        up.append('lineUserId', lineUserId);
+        const ur = await fetch('/api/liff/uploads', { method: 'POST', body: up });
+        const uj = (await ur.json()) as { success: boolean; error?: string; data?: { key: string; fileName: string; mimeType: string; size: number } };
+        if (!uj.success || !uj.data) {
+          showError(form, uj.error || `「${f.name}」のアップロードに失敗しました`);
+          submitBtn.disabled = false;
+          submitBtn.textContent = '依頼する';
+          return;
+        }
+        attachments.push(uj.data);
+      }
+      submitBtn.textContent = '送信中…';
+
       const body = {
         lineUserId,
         assigneeFriendId: String(fd.get('assignee') || ''),
@@ -267,6 +307,7 @@ export async function initTaskRequestPage(lineUserId: string) {
         dueAt: dateToIsoJst(String(fd.get('dueAt') || '')),
         description: String(fd.get('description') || ''),
         priority: String(fd.get('priority') || 'medium'),
+        attachments,
       };
       const res = await fetch('/api/liff/tasks', {
         method: 'POST',

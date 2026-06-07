@@ -32,6 +32,10 @@ import {
   buildCompletionApprovalCard,
   buildCompletionNoticeCard,
 } from '../services/task-flex.js';
+import {
+  insertTaskAttachment,
+  listTaskAttachmentViews,
+} from '../services/task-attachments.js';
 import type { Env } from '../index.js';
 
 // =============================================================================
@@ -103,11 +107,13 @@ async function pushTaskAssignedNotice(
   if (!assignee.line_user_id) return;
   try {
     const client = new LineClient(env.LINE_CHANNEL_ACCESS_TOKEN);
+    const attachments = await listTaskAttachmentViews(env.DB, task.id, env.WORKER_URL);
     const card = buildTaskCard({
       task,
       assigneeName: assignee.display_name ?? null,
       actions: ['start', 'complete_assignee', 'delay_menu', 'problem'],
       showDescription: true,
+      attachments,
     });
     await client.pushFlexMessage(
       assignee.line_user_id,
@@ -382,6 +388,7 @@ tasks.post('/api/liff/tasks', async (c) => {
       dueAt: string;
       description?: string | null;
       priority?: string;
+      attachments?: Array<{ key: string; fileName: string; mimeType?: string | null; size?: number | null }>;
     }>();
     if (!body.lineUserId) return c.json({ success: false, error: 'lineUserId required' }, 400);
     if (!body.assigneeFriendId) return c.json({ success: false, error: 'assigneeFriendId required' }, 400);
@@ -403,6 +410,21 @@ tasks.post('/api/liff/tasks', async (c) => {
       priority: normalizePriority(body.priority),
     });
 
+    // 添付ファイル (アップロード済み R2 キー) をタスクに紐づける
+    if (Array.isArray(body.attachments)) {
+      for (const att of body.attachments.slice(0, 5)) {
+        if (!att?.key || !att?.fileName) continue;
+        await insertTaskAttachment(c.env.DB, {
+          taskId: task.id,
+          r2Key: att.key,
+          fileName: att.fileName,
+          mimeType: att.mimeType ?? null,
+          size: typeof att.size === 'number' ? att.size : null,
+          uploadedByFriendId: requester.id,
+        });
+      }
+    }
+
     await pushTaskAssignedNotice(c.env, task, assignee);
 
     return c.json({ success: true, data: serializeTask(task) });
@@ -410,6 +432,82 @@ tasks.post('/api/liff/tasks', async (c) => {
     console.error('POST /api/liff/tasks error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
   }
+});
+
+/**
+ * POST /api/liff/uploads — 依頼フォームのファイル添付アップロード (multipart/form-data)
+ *
+ * Fields:
+ *   file        添付ファイル (1リクエスト1ファイル)
+ *   lineUserId  アップロード者の LINE userId (friend 登録チェック用)
+ *
+ * R2 (IMAGES バケット) に `att-<uuid>.<ext>` で保存し、キーとメタを返す。
+ * クライアントは複数ファイルを順次アップロードし、得たキーを /api/liff/tasks に渡す。
+ */
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10MB
+
+function safeExt(fileName: string, mimeType: string): string {
+  const m = fileName.match(/\.([A-Za-z0-9]{1,8})$/);
+  if (m) return m[1].toLowerCase();
+  const sub = (mimeType.split('/')[1] || 'bin').toLowerCase();
+  return sub === 'jpeg' ? 'jpg' : sub.replace(/[^a-z0-9]/g, '').slice(0, 8) || 'bin';
+}
+
+tasks.post('/api/liff/uploads', async (c) => {
+  try {
+    const form = await c.req.formData();
+    const lineUserId = String(form.get('lineUserId') ?? '');
+    if (!lineUserId) return c.json({ success: false, error: 'lineUserId required' }, 400);
+    const uploader = await getFriendByLineUserId(c.env.DB, lineUserId);
+    if (!uploader) return c.json({ success: false, error: 'not registered as friend' }, 404);
+
+    const file = form.get('file');
+    if (!file || typeof file === 'string') {
+      return c.json({ success: false, error: 'file required' }, 400);
+    }
+    const blob = file as unknown as { name?: string; type?: string; size: number; arrayBuffer: () => Promise<ArrayBuffer> };
+    if (blob.size > MAX_ATTACHMENT_BYTES) {
+      return c.json({ success: false, error: 'ファイルが大きすぎます (上限 10MB)' }, 400);
+    }
+    const fileName = (blob.name || 'file').slice(0, 255);
+    const mimeType = blob.type || 'application/octet-stream';
+    const data = await blob.arrayBuffer();
+    const key = `att-${crypto.randomUUID()}.${safeExt(fileName, mimeType)}`;
+
+    await c.env.IMAGES.put(key, data, {
+      httpMetadata: { contentType: mimeType },
+      customMetadata: { originalFilename: fileName },
+    });
+
+    return c.json(
+      { success: true, data: { key, fileName, mimeType, size: blob.size } },
+      201,
+    );
+  } catch (err) {
+    console.error('POST /api/liff/uploads error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+/**
+ * GET /files/:key — 添付ファイルの公開配信 (R2 から stream)。
+ * key は `att-<uuid>.<ext>` のフラット形式。元ファイル名で表示する。
+ */
+tasks.get('/files/:key', async (c) => {
+  const key = c.req.param('key');
+  const object = await c.env.IMAGES.get(key);
+  if (!object) return c.json({ success: false, error: 'File not found' }, 404);
+
+  const headers = new Headers();
+  headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
+  headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+  headers.set('ETag', object.etag);
+  const original = object.customMetadata?.originalFilename;
+  if (original) {
+    // 日本語ファイル名対応: RFC 5987 (filename*) でエンコード
+    headers.set('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(original)}`);
+  }
+  return new Response(object.body, { headers });
 });
 
 /**

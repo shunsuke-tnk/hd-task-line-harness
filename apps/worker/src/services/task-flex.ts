@@ -33,8 +33,23 @@ function daysRemainingLabel(dueIso: string): { label: string; color: string } {
   return { label: `あと${days}日`, color: '#388E3C' };
 }
 
-function statusBadge(status: string): { label: string; color: string } {
-  switch (status) {
+// ステータスバッジは task.status だけでなく 2段階承認の進行状況も加味する。
+// (status='pending'/'in_progress' のまま completion_*_marked_at が立つため、
+//  status 単独だと「未着手」なのに本文は「完了報告済み」という矛盾が起きていた)
+function statusBadge(task: Task): { label: string; color: string } {
+  // 確定状態を最優先
+  if (task.status === 'done') return { label: '完了', color: '#43A047' };
+  if (task.status === 'cancelled') return { label: '取消', color: '#616161' };
+
+  // 完了承認フロー進行中 (確定前) — 本文の「完了承認」欄と表記を一致させる
+  const assigneeMarked = !!task.completion_assignee_marked_at;
+  const requesterMarked = !!task.completion_requester_marked_at;
+  if (assigneeMarked && requesterMarked) return { label: '完了確定処理中', color: '#43A047' };
+  if (assigneeMarked) return { label: '承認待ち', color: '#06C755' }; // 担当者が完了報告済み
+  if (requesterMarked) return { label: '完了報告待ち', color: '#FB8C00' }; // 依頼者が事前承認済み
+
+  // 通常状態
+  switch (task.status) {
     case 'pending':
       return { label: '未着手', color: '#9E9E9E' };
     case 'in_progress':
@@ -43,12 +58,8 @@ function statusBadge(status: string): { label: string; color: string } {
       return { label: '遅延', color: '#F4511E' };
     case 'problem':
       return { label: '問題報告', color: '#D32F2F' };
-    case 'done':
-      return { label: '完了', color: '#43A047' };
-    case 'cancelled':
-      return { label: '取消', color: '#616161' };
     default:
-      return { label: status, color: '#9E9E9E' };
+      return { label: task.status, color: '#9E9E9E' };
   }
 }
 
@@ -67,6 +78,12 @@ function priorityBadge(priority: string | undefined | null): { label: string; co
 
 // ── 1. タスクカード (1件) ────────────────────────────────────────────────────
 
+/** タスクに紐づく添付ファイル (依頼フォームから R2 にアップロードされたもの)。 */
+export interface TaskAttachmentView {
+  fileName: string;
+  url: string;
+}
+
 export interface TaskCardOpts {
   task: Task;
   assigneeName: string | null;
@@ -76,6 +93,8 @@ export interface TaskCardOpts {
    *  - 担当者通知 (新規タスク push) と タスク詳細表示 で true にする想定。
    *  - リマインドや完了通知では情報過多を避けるため false。 */
   showDescription?: boolean;
+  /** 添付ファイル (あれば body に「📎 添付」ボタンを表示)。 */
+  attachments?: TaskAttachmentView[];
 }
 
 export type TaskCardAction =
@@ -92,7 +111,8 @@ export function buildTaskCard(opts: TaskCardOpts): unknown {
   const { task, assigneeName } = opts;
   const due = formatDate(task.due_at);
   const remaining = daysRemainingLabel(task.due_at);
-  const status = statusBadge(task.status);
+  const status = statusBadge(task);
+  const attachments = opts.attachments ?? [];
 
   const buttons = opts.actions.map((a) => actionToButton(task, a));
 
@@ -170,6 +190,31 @@ export function buildTaskCard(opts: TaskCardOpts): unknown {
                     color: '#555555',
                     wrap: true,
                   },
+                ],
+              },
+            ]
+          : []),
+        // 添付ファイル (依頼フォームでアップロードされたもの)
+        ...(attachments.length
+          ? [
+              { type: 'separator', margin: 'sm' },
+              {
+                type: 'box',
+                layout: 'vertical',
+                spacing: 'xs',
+                margin: 'sm',
+                contents: [
+                  { type: 'text', text: `📎 添付 (${attachments.length})`, size: 'xs', color: '#888888' },
+                  ...attachments.slice(0, 5).map((a) => ({
+                    type: 'button',
+                    style: 'link',
+                    height: 'sm',
+                    action: {
+                      type: 'uri',
+                      label: a.fileName.length > 28 ? a.fileName.slice(0, 27) + '…' : a.fileName,
+                      uri: a.url,
+                    },
+                  })),
                 ],
               },
             ]

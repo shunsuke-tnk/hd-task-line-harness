@@ -15,6 +15,7 @@ export async function authMiddleware(c: Context<Env>, next: Next): Promise<Respo
     path.startsWith('/r/') ||
     path.startsWith('/pool/') ||
     path.startsWith('/images/') ||
+    path.startsWith('/files/') ||
     path.startsWith('/api/liff/') ||
     path.startsWith('/auth/') ||
     path === '/setup' ||

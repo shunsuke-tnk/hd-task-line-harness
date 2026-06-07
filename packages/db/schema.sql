@@ -674,3 +674,16 @@ CREATE TABLE IF NOT EXISTS staff_metrics (
   delay_report_count    INTEGER NOT NULL DEFAULT 0,
   updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- HD TaskBot: 依頼フォームのファイル添付 (migration 033_task_attachments.sql)
+CREATE TABLE IF NOT EXISTS task_attachments (
+  id                    TEXT PRIMARY KEY,
+  task_id               TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  r2_key                TEXT NOT NULL,
+  file_name             TEXT NOT NULL,
+  mime_type             TEXT,
+  size                  INTEGER,
+  uploaded_by_friend_id TEXT REFERENCES friends(id) ON DELETE SET NULL,
+  created_at            TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_task_attachments_task ON task_attachments(task_id, created_at);

@@ -239,6 +239,7 @@ async function handleEvent(
         replyToken: event.replyToken,
         postbackData,
         liffUrl,
+        workerUrl: workerUrl ?? '',
       });
       if (handled) return;
     } catch (err) {
@@ -331,6 +332,56 @@ async function handleEvent(
       )
       .bind(logId, friend.id, incomingText, now)
       .run();
+
+    // ── HD TaskBot: 登録キーワードで「スタッフ登録申請」カードを (再) 送信 ──
+    // 新メンバーは友だち追加直後の Welcome カードを逃しても、「登録」等と送れば
+    // いつでも申請カードを呼び出せる。管理者は申請通知を 1 タップで承認するだけ。
+    {
+      const t = incomingText.trim();
+      const REG_KEYWORDS = ['登録', 'スタッフ登録', 'メンバー登録', '参加', '申請', 'はじめる', '始める'];
+      if (REG_KEYWORDS.includes(t)) {
+        try {
+          const roleRow = await db
+            .prepare(
+              `SELECT t.name FROM friend_tags ft
+               INNER JOIN tags t ON t.id = ft.tag_id
+               WHERE ft.friend_id = ? AND t.name IN ('role:admin','role:staff')
+               LIMIT 1`,
+            )
+            .bind(friend.id)
+            .first<{ name: string }>();
+          if (roleRow) {
+            await lineClient.replyMessage(event.replyToken, [
+              { type: 'text', text: '既に登録済みです。リッチメニューからご利用ください🙏' } as never,
+            ]);
+            return;
+          }
+          const pendingRow = await db
+            .prepare(
+              `SELECT t.name FROM friend_tags ft
+               INNER JOIN tags t ON t.id = ft.tag_id
+               WHERE ft.friend_id = ? AND t.name = 'pending:staff'
+               LIMIT 1`,
+            )
+            .bind(friend.id)
+            .first<{ name: string }>();
+          if (pendingRow) {
+            await lineClient.replyMessage(event.replyToken, [
+              { type: 'text', text: '申請は受付済みです。管理者の承認をお待ちください🙏' } as never,
+            ]);
+            return;
+          }
+          const card = buildWelcomeApplyCard({ displayName: friend.display_name ?? null });
+          await lineClient.replyMessage(event.replyToken, [
+            { type: 'flex', altText: 'スタッフ登録のご案内', contents: card } as never,
+          ]);
+          return;
+        } catch (err) {
+          console.error('registration keyword handling failed', err);
+          // 失敗時は通常フローへフォールスルー
+        }
+      }
+    }
 
     // ── lazy intercept: 社員/委託 区分が未登録の HD スタッフに登録カードを返信 ──
     // 条件:

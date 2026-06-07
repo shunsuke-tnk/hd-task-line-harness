@@ -70,6 +70,7 @@ import {
   type TaskCardAction,
   type ProblemListItem,
 } from './task-flex.js';
+import { listTaskAttachmentViews } from './task-attachments.js';
 
 // Rich Menu / Tag IDs (本番運用値、変更時は両方とも更新)
 // v6/v5 (2026-05-12): 全員共通 6 ボタンレイアウト (タスク依頼/完了報告/遅延報告/問題報告/プロジェクト一覧/依頼・提案)
@@ -91,6 +92,8 @@ interface PostbackContext {
   replyToken: string;
   postbackData: string;
   liffUrl: string;
+  /** Flex の添付 uri を絶対URLにするための Worker のベースURL (WORKER_URL)。 */
+  workerUrl: string;
 }
 
 /**
@@ -570,9 +573,23 @@ export async function handleTaskPostback(ctx: PostbackContext): Promise<boolean>
       const isAssignee = task.assignee_friend_id === ctx.friend.id;
       const isRequester = task.requester_friend_id === ctx.friend.id;
       const isAdmin = await friendHasAdminRole(ctx.db, ctx.friend.id);
+      // 状態に応じてボタンを出し分け (完了/取消後はアクションを出さない)。
+      // 2段階承認の進行に合わせ、まだマークしていない側にだけ完了系ボタンを出す。
       const actions: TaskCardAction[] = [];
-      if (isAssignee || isAdmin) actions.push('complete', 'delay_menu', 'problem');
-      if (isRequester || isAdmin) actions.push('cancel');
+      const isClosed = task.status === 'done' || task.status === 'cancelled';
+      const assigneeMarked = !!task.completion_assignee_marked_at;
+      const requesterMarked = !!task.completion_requester_marked_at;
+      if (!isClosed) {
+        if (isAssignee || isAdmin) {
+          if (!assigneeMarked) actions.push('complete_assignee');
+          actions.push('delay_menu', 'problem');
+        }
+        if (isRequester || isAdmin) {
+          if (!requesterMarked) actions.push('complete_requester');
+          actions.push('cancel');
+        }
+      }
+      const attachments = await listTaskAttachmentViews(ctx.db, task.id, ctx.workerUrl);
       await replyFlex(
         ctx,
         `${task.display_id} 詳細`,
@@ -581,6 +598,7 @@ export async function handleTaskPostback(ctx: PostbackContext): Promise<boolean>
           assigneeName: assignee?.display_name ?? null,
           actions,
           showDescription: true,
+          attachments,
         }),
       );
       return true;
